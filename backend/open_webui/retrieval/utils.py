@@ -766,12 +766,12 @@ def generate_ollama_batch_embeddings(
         log.debug(
             f"generate_ollama_batch_embeddings:model {model} batch size: {len(texts)}"
         )
-        json_data = {"input": texts, "model": model}
+        json_data = {"input": texts, "model": model, "prompt": "\n".join(texts)}
         if isinstance(RAG_EMBEDDING_PREFIX_FIELD_NAME, str) and isinstance(prefix, str):
             json_data[RAG_EMBEDDING_PREFIX_FIELD_NAME] = prefix
 
         r = requests.post(
-            f"{url}/api/embed",
+            f"{url}/api/embeddings",
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {key}",
