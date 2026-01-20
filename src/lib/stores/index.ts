@@ -193,6 +193,7 @@ type Settings = {
 	models?: string[];
 	conversationMode?: boolean;
 	speechAutoSend?: boolean;
+	speechAutoMute?: boolean;
 	responseAutoPlayback?: boolean;
 	audio?: AudioSettings;
 	showUsername?: boolean;

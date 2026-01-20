@@ -17,6 +17,7 @@
 	// Audio
 	let conversationMode = false;
 	let speechAutoSend = false;
+	let speechAutoMute = true;
 	let responseAutoPlayback = false;
 	let nonLocalVoices = false;
 
@@ -82,10 +83,16 @@
 		saveSettings({ speechAutoSend: speechAutoSend });
 	};
 
+	const toggleSpeechAutoMute = async () => {
+		speechAutoMute = !speechAutoMute;
+		saveSettings({ speechAutoMute: speechAutoMute });
+	};
+
 	onMount(async () => {
 		playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
 		conversationMode = $settings.conversationMode ?? false;
 		speechAutoSend = $settings.speechAutoSend ?? false;
+		speechAutoMute = $settings.speechAutoMute ?? true;
 		responseAutoPlayback = $settings.responseAutoPlayback ?? false;
 
 		STTEngine = $settings?.audio?.stt?.engine ?? '';
@@ -228,6 +235,24 @@
 					type="button"
 				>
 					{#if speechAutoSend === true}
+						<span class="ml-2 self-center">{$i18n.t('On')}</span>
+					{:else}
+						<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+					{/if}
+				</button>
+			</div>
+
+			<div class=" py-0.5 flex w-full justify-between">
+				<div class=" self-center text-xs font-medium">{$i18n.t('Auto-mute on silence')}</div>
+
+				<button
+					class="p-1 px-3 text-xs flex rounded-sm transition"
+					on:click={() => {
+						toggleSpeechAutoMute();
+					}}
+					type="button"
+				>
+					{#if speechAutoMute === true}
 						<span class="ml-2 self-center">{$i18n.t('On')}</span>
 					{:else}
 						<span class="ml-2 self-center">{$i18n.t('Off')}</span>

@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import { tick, getContext, onMount, onDestroy } from 'svelte';
-	import { config, settings } from '$lib/stores';
+	import { config, isApp, settings } from '$lib/stores';
 	import { blobToFile, calculateSHA256, extractCurlyBraceWords } from '$lib/utils';
 
 	import { transcribeAudio } from '$lib/apis/audio';
+	import MicSolid from '$lib/components/icons/MicSolid.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 
 	import dayjs from 'dayjs';
@@ -33,6 +34,7 @@
 	let durationCounter = null;
 
 	let transcription = '';
+	let stopReason: 'cancel' | 'finalize' | null = null;
 
 	const startDurationCounter = () => {
 		durationCounter = setInterval(() => {
@@ -65,9 +67,25 @@
 	let audioChunks = [];
 
 	const MIN_DECIBELS = -45;
+	const SILENCE_TIMEOUT_MS = 2000;
+	const SILENCE_RMS_THRESHOLD = 0.02;
 	let VISUALIZER_BUFFER_LENGTH = 300;
 
 	let visualizerData = Array(VISUALIZER_BUFFER_LENGTH).fill(0);
+	let hasStartedSpeaking = false;
+	let autoMuted = false;
+
+	let supportsBrowserStt = false;
+	let useWebStt = false;
+	let autoMuteOnSilence = true;
+
+	$: supportsBrowserStt =
+		typeof window !== 'undefined' &&
+		('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+	$: useWebStt =
+		supportsBrowserStt && !$isApp && (($settings?.audio?.stt?.engine ?? '') === 'web' ||
+			($settings?.audio?.stt?.engine ?? '') === '');
+	$: autoMuteOnSilence = $settings?.speechAutoMute ?? true;
 
 	// Function to calculate the RMS level from time domain data
 	const calculateRMS = (data: Uint8Array) => {
@@ -123,15 +141,21 @@
 
 					visualizerData = visualizerData;
 
-					// if (domainData.some((value) => value > 0)) {
-					// 	lastSoundTime = Date.now();
-					// }
+					if (rmsLevel > SILENCE_RMS_THRESHOLD) {
+						hasStartedSpeaking = true;
+						lastSoundTime = Date.now();
+					}
 
-					// if (recording && Date.now() - lastSoundTime > 3000) {
-					// 	if ($settings?.speechAutoSend ?? false) {
-					// 		confirmRecording();
-					// 	}
-					// }
+					if (
+						autoMuteOnSilence &&
+						hasStartedSpeaking &&
+						!autoMuted &&
+						Date.now() - lastSoundTime > SILENCE_TIMEOUT_MS
+					) {
+						autoMuted = true;
+						muteRecording();
+						return;
+					}
 				}
 
 				window.requestAnimationFrame(processFrame);
@@ -150,7 +174,7 @@
 		const file = blobToFile(audioBlob, `Recording-${dayjs().format('L LT')}.${ext}`);
 
 		if (transcribe) {
-			if ($config.audio.stt.engine === 'web' || ($settings?.audio?.stt?.engine ?? '') === 'web') {
+			if (useWebStt) {
 				// with web stt, we don't need to send the file to the server
 				return;
 			}
@@ -178,6 +202,10 @@
 
 	const startRecording = async () => {
 		loading = true;
+		stopReason = null;
+		transcription = '';
+		hasStartedSpeaking = false;
+		autoMuted = false;
 
 		try {
 			if (displayMedia) {
@@ -262,64 +290,68 @@
 		}
 
 		if (transcribe) {
-			if ($config.audio.stt.engine === 'web' || ($settings?.audio?.stt?.engine ?? '') === 'web') {
-				if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
-					// Create a SpeechRecognition object
-					speechRecognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+			if (useWebStt && supportsBrowserStt) {
+				// Create a SpeechRecognition object
+				speechRecognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
 
-					// Set continuous to true for continuous recognition
-					speechRecognition.continuous = true;
+				// Set continuous to true for continuous recognition
+				speechRecognition.continuous = true;
+				speechRecognition.interimResults = true;
 
-					// Set the timeout for turning off the recognition after inactivity (in milliseconds)
-					const inactivityTimeout = 2000; // 3 seconds
+				if ($settings?.audio?.stt?.language) {
+					speechRecognition.lang = $settings.audio.stt.language;
+				}
 
-					let timeoutId;
-					// Start recognition
-					speechRecognition.start();
+				// Start recognition
+				speechRecognition.start();
 
-					// Event triggered when speech is recognized
-					speechRecognition.onresult = async (event) => {
-						// Clear the inactivity timeout
-						clearTimeout(timeoutId);
-
-						// Handle recognized speech
-						console.log(event);
-						const transcript = event.results[Object.keys(event.results).length - 1][0].transcript;
-
+				// Event triggered when speech is recognized
+				speechRecognition.onresult = async (event) => {
+					console.log(event);
+					const latestResult = event.results[event.results.length - 1];
+					if (latestResult?.isFinal) {
+						const transcript = latestResult[0]?.transcript ?? '';
 						transcription = `${transcription}${transcript}`;
+					}
 
-						await tick();
-						document.getElementById('chat-input')?.focus();
+					await tick();
+					document.getElementById('chat-input')?.focus();
+				};
 
-						// Restart the inactivity timeout
-						timeoutId = setTimeout(() => {
-							console.log('Speech recognition turned off due to inactivity.');
-							speechRecognition.stop();
-						}, inactivityTimeout);
-					};
+				// Event triggered when recognition is ended
+				speechRecognition.onend = function () {
+					console.log('recognition ended');
 
-					// Event triggered when recognition is ended
-					speechRecognition.onend = function () {
-						// Restart recognition after it ends
-						console.log('recognition ended');
+					if (stopReason === 'cancel') {
+						stopReason = null;
+						return;
+					}
 
-						confirmRecording();
+					if (!stopReason && recording && !autoMuteOnSilence) {
+						speechRecognition.start();
+						return;
+					}
+
+					stopReason = null;
+					if (transcription.trim().length > 0) {
 						onConfirm({
 							text: transcription
 						});
-						confirmed = false;
-						loading = false;
-					};
-
-					// Event triggered when an error occurs
-					speechRecognition.onerror = function (event) {
-						console.log(event);
-						toast.error($i18n.t(`Speech recognition error: {{error}}`, { error: event.error }));
+					} else {
 						onCancel();
+					}
+					confirmed = false;
+					loading = false;
+				};
 
-						stopRecording();
-					};
-				}
+				// Event triggered when an error occurs
+				speechRecognition.onerror = function (event) {
+					console.log(event);
+					toast.error($i18n.t(`Speech recognition error: {{error}}`, { error: event.error }));
+					onCancel();
+
+					stopRecording();
+				};
 			}
 		}
 	};
@@ -360,6 +392,22 @@
 		}
 
 		stream = null;
+
+		if (speechRecognition) {
+			speechRecognition.stop();
+		}
+	};
+
+	const muteRecording = async () => {
+		stopReason = 'finalize';
+		await confirmRecording();
+	};
+
+	const cancelRecording = async () => {
+		stopReason = 'cancel';
+		transcription = '';
+		await stopRecording();
+		onCancel();
 	};
 
 	let resizeObserver;
@@ -407,10 +455,7 @@
 
 
              rounded-full"
-			on:click={async () => {
-				stopRecording();
-				onCancel();
-			}}
+			on:click={cancelRecording}
 		>
 			<XMark className={'size-4'} />
 		</button>
@@ -454,6 +499,21 @@
 		</div>
 
 		<div class="flex items-center">
+			<button
+				type="button"
+				class="p-1.5 mr-1
+
+            {loading
+					? ' bg-gray-200 dark:bg-gray-700/50'
+					: 'bg-indigo-400/20 text-indigo-600 dark:text-indigo-300 '}
+
+             rounded-full"
+				on:click={muteRecording}
+				aria-label={$i18n.t('Mute')}
+			>
+				<MicSolid className="size-4" />
+			</button>
+
 			{#if loading}
 				<div class=" text-gray-500 rounded-full cursor-not-allowed">
 					<svg
