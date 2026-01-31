@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
+	import { config, isApp, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 
 	const dispatch = createEventDispatcher();
@@ -40,9 +40,46 @@
 	let chatStreaming = false;
 	let rmsLevel = 0;
 	let hasStartedSpeaking = false;
+	let transcription = '';
 	let mediaRecorder;
 	let audioStream = null;
 	let audioChunks = [];
+	let speechRecognition;
+	let supportsBrowserStt = false;
+	let useWebStt = false;
+	let speechEndResolver = null;
+
+	const waitForSpeechRecognitionEnd = () =>
+		new Promise((resolve) => {
+			speechEndResolver = resolve;
+		});
+
+	const stopSpeechRecognition = async () => {
+		if (!speechRecognition) {
+			return;
+		}
+
+		const endPromise = waitForSpeechRecognitionEnd();
+
+		try {
+			speechRecognition.stop();
+		} catch (error) {
+			console.error('Error stopping speech recognition:', error);
+		}
+
+		await Promise.race([endPromise, new Promise((resolve) => setTimeout(resolve, 500))]);
+		speechRecognition = null;
+	};
+
+	$: supportsBrowserStt =
+		typeof window !== 'undefined' &&
+		('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+	$: settingsSttEngine = $settings?.audio?.stt?.engine ?? '';
+	$: configSttEngine = $config?.audio?.stt?.engine ?? '';
+	$: effectiveSttEngine =
+		configSttEngine === 'web' ? 'web' : settingsSttEngine || configSttEngine;
+	$: useWebStt =
+		supportsBrowserStt && !$isApp && (effectiveSttEngine === 'web' || effectiveSttEngine === '');
 
 	let videoInputDevices = [];
 	let selectedVideoInputDeviceId = null;
@@ -202,8 +239,19 @@
 					];
 				}
 
-				const audioBlob = new Blob(_audioChunks, { type: 'audio/wav' });
-				await transcribeHandler(audioBlob);
+				if (useWebStt) {
+					await stopSpeechRecognition();
+					const text = transcription.trim();
+					transcription = '';
+
+					if (text) {
+						const _responses = await submitPrompt(text, { _raw: true });
+						console.log(_responses);
+					}
+				} else {
+					const audioBlob = new Blob(_audioChunks, { type: 'audio/wav' });
+					await transcribeHandler(audioBlob);
+				}
 
 				confirmed = false;
 				loading = false;
@@ -249,6 +297,46 @@
 				stopRecordingCallback();
 			};
 
+			if (useWebStt && !speechRecognition) {
+				transcription = '';
+				speechRecognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+				speechRecognition.continuous = true;
+				speechRecognition.interimResults = true;
+
+				if ($settings?.audio?.stt?.language) {
+					speechRecognition.lang = $settings.audio.stt.language;
+				}
+
+				speechRecognition.onresult = async (event) => {
+					const latestResult = event.results[event.results.length - 1];
+					if (latestResult?.isFinal) {
+						const transcript = latestResult[0]?.transcript ?? '';
+						transcription = `${transcription}${transcript}`;
+					}
+
+					await tick();
+				};
+
+				speechRecognition.onend = () => {
+					if (speechEndResolver) {
+						speechEndResolver();
+						speechEndResolver = null;
+					}
+				};
+
+				speechRecognition.onerror = (event) => {
+					console.log(event);
+					if (event?.error !== 'aborted') {
+						toast.error(
+							$i18n.t(`Speech recognition error: {{error}}`, { error: event.error })
+						);
+					}
+					stopAudioStream();
+				};
+
+				speechRecognition.start();
+			}
+
 			analyseAudio(audioStream);
 		}
 	};
@@ -261,6 +349,8 @@
 		} catch (error) {
 			console.log('Error stopping audio stream:', error);
 		}
+
+		await stopSpeechRecognition();
 
 		if (!audioStream) return;
 
@@ -697,6 +787,13 @@
 
 {#if $showCallOverlay}
 	<div class="max-w-lg w-full h-full max-h-[100dvh] flex flex-col justify-between p-3 md:p-6">
+		<div class="flex items-center justify-center">
+			<div
+				class="px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] rounded-full border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-400/60 dark:bg-amber-500/10 dark:text-amber-200"
+			>
+				Local build voice mode
+			</div>
+		</div>
 		{#if camera}
 			<button
 				type="button"
