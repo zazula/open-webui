@@ -347,7 +347,9 @@
 				// Event triggered when an error occurs
 				speechRecognition.onerror = function (event) {
 					console.log(event);
-					toast.error($i18n.t(`Speech recognition error: {{error}}`, { error: event.error }));
+					if (event?.error !== 'aborted') {
+						toast.error($i18n.t(`Speech recognition error: {{error}}`, { error: event.error }));
+					}
 					onCancel();
 
 					stopRecording();
