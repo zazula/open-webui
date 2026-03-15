@@ -66,6 +66,7 @@
 		displayFileHandler
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import { planVoiceProtocolContent } from '$lib/utils/voiceProtocol';
 
 	import {
 		archiveChatById,
@@ -1707,20 +1708,25 @@
 			}
 		}
 
-		if (content) {
-			// REALTIME_CHAT_SAVE is disabled
-			message.content = content;
+	if (content) {
+		// REALTIME_CHAT_SAVE is disabled
+		message.content = content;
+		const responseChannelPlan = planVoiceProtocolContent(
+			message.content,
+			$settings?.responseOutputChannel ?? 'both'
+		);
+		const ttsContent = responseChannelPlan.voiceText ?? responseChannelPlan.displayText ?? '';
 
-			if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
-				navigator.vibrate(5);
-			}
+		if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
+			navigator.vibrate(5);
+		}
 
 			// Emit chat event for TTS (only when call overlay is active)
-			if ($showCallOverlay) {
-				const messageContentParts = getMessageContentParts(
-					removeAllDetails(message.content),
-					$config?.audio?.tts?.split_on ?? 'punctuation'
-				);
+	if ($showCallOverlay) {
+		const messageContentParts = getMessageContentParts(
+			removeAllDetails(ttsContent),
+			$config?.audio?.tts?.split_on ?? 'punctuation'
+		);
 				messageContentParts.pop();
 
 				// dispatch only last sentence and make sure it hasn't been dispatched before
@@ -1752,23 +1758,29 @@
 
 		history.messages[message.id] = message;
 
-		if (done) {
-			message.done = true;
+	if (done) {
+		message.done = true;
+		const responseChannelPlan = planVoiceProtocolContent(
+			message.content,
+			$settings?.responseOutputChannel ?? 'both'
+		);
 
-			if ($settings.responseAutoCopy) {
-				copyToClipboard(message.content);
-			}
+		if ($settings.responseAutoCopy) {
+			copyToClipboard(responseChannelPlan.displayText ?? responseChannelPlan.voiceText ?? '');
+		}
 
-			if ($settings.responseAutoPlayback && !$showCallOverlay) {
-				await tick();
-				document.getElementById(`speak-button-${message.id}`)?.click();
-			}
+		if ($settings.responseAutoPlayback && !$showCallOverlay && responseChannelPlan.voiceText) {
+			await tick();
+			document.getElementById(`speak-button-${message.id}`)?.click();
+		}
 
 			// Emit chat event for TTS (only when call overlay is active)
 			if ($showCallOverlay) {
 				let lastMessageContentPart =
 					getMessageContentParts(
-						removeAllDetails(message.content),
+						removeAllDetails(
+							responseChannelPlan.voiceText ?? responseChannelPlan.displayText ?? ''
+						),
 						$config?.audio?.tts?.split_on ?? 'punctuation'
 					)?.at(-1) ?? '';
 				if (lastMessageContentPart) {
@@ -1783,7 +1795,7 @@
 				new CustomEvent('chat:finish', {
 					detail: {
 						id: message.id,
-						content: message.content
+						content: responseChannelPlan.displayText ?? responseChannelPlan.voiceText ?? ''
 					}
 				})
 			);

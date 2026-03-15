@@ -112,6 +112,16 @@ export const artifactContents = writable(null);
 
 export const embed = writable(null);
 
+export type VoiceInputState = {
+	muted: boolean;
+	autoMuted: boolean;
+};
+
+export const voiceInputState: Writable<VoiceInputState> = writable({
+	muted: false,
+	autoMuted: false
+});
+
 export const temporaryChatEnabled = writable(false);
 
 // Transient one-shot event from the desktop shell (Spotlight, drag-and-drop, etc.).
@@ -221,6 +231,7 @@ type Settings = {
 	speechAutoSend?: boolean;
 	speechAutoMute?: boolean;
 	responseAutoPlayback?: boolean;
+	responseOutputChannel?: 'both' | 'display' | 'voice';
 	audio?: AudioSettings;
 	showUsername?: boolean;
 	notificationEnabled?: boolean;
