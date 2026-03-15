@@ -4,6 +4,10 @@
 
 	import { user, settings, config } from '$lib/stores';
 	import { getVoices as _getVoices } from '$lib/apis/audio';
+	import {
+		VOICE_RESPONSE_CHANNELS,
+		type VoiceResponseChannel
+	} from '$lib/utils/voiceProtocol';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -19,6 +23,7 @@
 	let speechAutoSend = false;
 	let speechAutoMute = true;
 	let responseAutoPlayback = false;
+	let responseOutputChannel: VoiceResponseChannel = 'both';
 	let nonLocalVoices = false;
 
 	let STTEngine = '';
@@ -94,6 +99,7 @@
 		speechAutoSend = $settings.speechAutoSend ?? false;
 		speechAutoMute = $settings.speechAutoMute ?? true;
 		responseAutoPlayback = $settings.responseAutoPlayback ?? false;
+		responseOutputChannel = ($settings.responseOutputChannel ?? 'both') as VoiceResponseChannel;
 
 		STTEngine = $settings?.audio?.stt?.engine ?? '';
 		STTLanguage = $settings?.audio?.stt?.language ?? '';
@@ -177,7 +183,8 @@
 					defaultVoice: $config?.audio?.tts?.voice ?? '',
 					nonLocalVoices: $config.audio.tts.engine === '' ? nonLocalVoices : undefined
 				}
-			}
+			},
+			responseOutputChannel
 		});
 		dispatch('save');
 	}}
@@ -313,6 +320,30 @@
 						<span class="ml-2 self-center">{$i18n.t('Off')}</span>
 					{/if}
 				</button>
+			</div>
+
+			<div class=" py-0.5 flex w-full justify-between">
+				<div class=" self-center text-xs font-medium">{$i18n.t('Response Output Channel')}</div>
+
+				<div class="flex items-center relative">
+					<select
+						class="w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+						bind:value={responseOutputChannel}
+						aria-label={$i18n.t('Response Output Channel')}
+					>
+						{#each VOICE_RESPONSE_CHANNELS as option}
+							<option value={option}>
+								{#if option === 'both'}
+									{$i18n.t('Both')}
+								{:else if option === 'display'}
+									{$i18n.t('Display only')}
+								{:else}
+									{$i18n.t('Voice only')}
+								{/if}
+							</option>
+						{/each}
+					</select>
+				</div>
 			</div>
 
 			<div class=" py-0.5 flex w-full justify-between">

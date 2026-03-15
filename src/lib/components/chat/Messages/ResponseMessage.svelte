@@ -57,6 +57,11 @@
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 	import FileItem from '$lib/components/common/FileItem.svelte';
 	import FollowUps from './ResponseMessage/FollowUps.svelte';
+	import {
+		getCopyableVoiceProtocolText,
+		planVoiceProtocolContent,
+		type VoiceProtocolContent
+	} from '$lib/utils/voiceProtocol';
 	import { fade } from 'svelte/transition';
 	import { flyAndScale } from '$lib/utils/transitions';
 	import RegenerateMenu from './ResponseMessage/RegenerateMenu.svelte';
@@ -66,7 +71,17 @@
 	interface MessageType {
 		id: string;
 		model: string;
-		content: string;
+		content: VoiceProtocolContent;
+		output?: {
+			type?: string;
+			status?: string;
+			duration?: number;
+			name?: string;
+			call_id?: string;
+			arguments?: unknown;
+			content?: { type?: string; text?: string }[];
+			summary?: { type?: string; text?: string }[];
+		}[];
 		files?: { type: string; url: string }[];
 		timestamp: number;
 		role: string;
@@ -119,11 +134,105 @@
 	export let messageId;
 	export let selectedModels = [];
 
-	let message: MessageType = JSON.parse(JSON.stringify(history.messages[messageId]));
-	$: if (history.messages) {
-		if (JSON.stringify(message) !== JSON.stringify(history.messages[messageId])) {
-			message = JSON.parse(JSON.stringify(history.messages[messageId]));
+	const LARGE_MESSAGE_RENDER_THRESHOLD = 50_000;
+	const LARGE_MESSAGE_PREVIEW_LENGTH = 1_200;
+
+	let message: MessageType = history.messages[messageId];
+	$: message = history.messages?.[messageId] ?? message;
+	let displayContent = '';
+	let largeMessageRenderKey = '';
+	let largeMessageExpanded = false;
+	let deferLargeMessageRender = false;
+	let largeMessagePreview = '';
+	let channelPlan = planVoiceProtocolContent(null);
+	let copyableContent = '';
+	let isVoiceOnlyMessage = false;
+
+	const escapeHtml = (value: string = '') =>
+		value
+			.replaceAll('&', '&amp;')
+			.replaceAll('<', '&lt;')
+			.replaceAll('>', '&gt;')
+			.replaceAll('"', '&quot;')
+			.replaceAll("'", '&#39;');
+
+	const serializeOutputForDisplay = (output: MessageType['output'] = []) => {
+		let content = '';
+
+		for (const [idx, item] of output.entries()) {
+			const itemType = item?.type ?? '';
+
+			if (itemType === 'message') {
+				for (const contentPart of item?.content ?? []) {
+					const text = contentPart?.text?.trim() ?? '';
+					if (text) {
+						content = `${content}${text}\n`;
+					}
+				}
+				continue;
+			}
+
+			if (itemType === 'reasoning') {
+				const sourceList = (item?.summary?.length ? item.summary : item?.content) ?? [];
+				const reasoningContent = sourceList
+					.map((contentPart) => contentPart?.text ?? '')
+					.join('')
+					.trim();
+
+				if (!reasoningContent) {
+					continue;
+				}
+
+				if (content && !content.endsWith('\n')) {
+					content += '\n';
+				}
+
+				const display = escapeHtml(
+					reasoningContent
+						.split('\n')
+						.map((line) => (line.startsWith('>') ? line : `> ${line}`))
+						.join('\n')
+				);
+
+				const duration = item?.duration ?? 0;
+				const isLastItem = idx === output.length - 1;
+				const done = item?.status === 'completed' || duration > 0 || !isLastItem;
+
+				content += done
+					? `<details type="reasoning" done="true" duration="${duration}">\n<summary>Thought for ${duration} seconds</summary>\n${display}\n</details>\n`
+					: `<details type="reasoning" done="false">\n<summary>Thinking…</summary>\n${display}\n</details>\n`;
+			}
 		}
+
+		return content.trim();
+	};
+
+	$: channelPlan = planVoiceProtocolContent(message?.content, $settings?.responseOutputChannel ?? 'both');
+	$: displayContent = serializeOutputForDisplay(message?.output) || channelPlan.displayText || '';
+	$: copyableContent = getCopyableVoiceProtocolText(
+		message?.content,
+		$settings?.responseOutputChannel ?? 'both'
+	);
+	$: isVoiceOnlyMessage = Boolean(message?.done && !displayContent && channelPlan.voiceText);
+	$: {
+		const renderKey = `${message?.id ?? ''}:${message?.done ? 'done' : 'streaming'}:${
+			displayContent?.length ?? 0
+		}`;
+		if (renderKey !== largeMessageRenderKey) {
+			largeMessageRenderKey = renderKey;
+			largeMessageExpanded = false;
+		}
+	}
+	$: deferLargeMessageRender =
+		Boolean(message?.done) &&
+		!edit &&
+		!largeMessageExpanded &&
+		(displayContent?.length ?? 0) > LARGE_MESSAGE_RENDER_THRESHOLD;
+	$: {
+		const previewSource = (copyableContent || removeAllDetails(displayContent || '') || '').trim();
+		largeMessagePreview = previewSource
+			.slice(0, LARGE_MESSAGE_PREVIEW_LENGTH)
+			.trimEnd();
 	}
 
 	export let siblings;
@@ -199,13 +308,14 @@
 	};
 
 	const speak = async () => {
-		if (!(message?.content ?? '').trim().length) {
+		if (!(channelPlan.voiceText ?? '').trim().length) {
 			toast.info($i18n.t('No content to speak'));
 			return;
 		}
 
 		speaking = true;
-		const content = removeAllDetails(message.content);
+		const content = removeAllDetails(channelPlan.voiceText ?? '');
+		const configAudioTts = $config?.audio?.tts ?? {};
 
 		// Get voice: model-specific > user settings > config default
 		const getVoiceId = () => {
@@ -214,13 +324,13 @@
 				return model.info.meta.tts.voice;
 			}
 			// Fall back to user settings or config default
-			if ($settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice) {
-				return $settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice;
+			if ($settings?.audio?.tts?.defaultVoice === configAudioTts.voice) {
+				return $settings?.audio?.tts?.voice ?? configAudioTts.voice;
 			}
-			return $config?.audio?.tts?.voice;
+			return configAudioTts.voice;
 		};
 
-		if ($config.audio.tts.engine === '') {
+		if ((configAudioTts.engine ?? '') === '') {
 			let voices = [];
 			const getVoicesLoop = setInterval(() => {
 				voices = speechSynthesis.getVoices();
@@ -359,6 +469,11 @@
 	}
 
 	const editMessageHandler = async () => {
+		if (typeof message.content !== 'string') {
+			toast.info($i18n.t('Channel-aware responses are not editable yet.'));
+			return;
+		}
+
 		edit = true;
 
 		editedContent = preprocessForEditing(message.content);
@@ -657,7 +772,7 @@
 								{#each message.files as file}
 									<div>
 										{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
-											<Image src={file.url} alt={message.content} />
+											<Image src={file.url} alt={copyableContent} />
 										{:else}
 											<FileItem
 												item={file}
@@ -757,9 +872,46 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if message.content === '' && !message.error && ((model?.info?.meta?.capabilities?.status_updates ?? true) ? (message?.statusHistory ?? [...(message?.status ? [message?.status] : [])]).length === 0 || (message?.statusHistory?.at(-1)?.hidden ?? false) : true)}
+							{#if displayContent === '' && !message.error && !isVoiceOnlyMessage && ((model?.info?.meta?.capabilities?.status_updates ?? true) ? (message?.statusHistory ?? [...(message?.status ? [message?.status] : [])]).length === 0 || (message?.statusHistory?.at(-1)?.hidden ?? false) : true)}
 								<Skeleton />
-							{:else if message.content && message.error !== true}
+							{:else if deferLargeMessageRender}
+								<div class="w-full rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+									<div class="flex flex-wrap items-center justify-between gap-3">
+										<div class="font-medium text-gray-900 dark:text-gray-100">
+											{$i18n.t('Large response collapsed for performance')}
+										</div>
+										<div class="text-xs text-gray-500 dark:text-gray-400">
+											{new Intl.NumberFormat().format(displayContent.length)} {$i18n.t('characters')}
+										</div>
+									</div>
+
+									<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+										{$i18n.t(
+											'Render the full message only when you need it. This keeps long chats responsive.'
+										)}
+									</p>
+
+									{#if largeMessagePreview}
+										<pre class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-5 text-gray-600 dark:bg-gray-950 dark:text-gray-300">{largeMessagePreview}{displayContent.length > LARGE_MESSAGE_PREVIEW_LENGTH ? '\n…' : ''}</pre>
+									{/if}
+
+									<div class="mt-3 flex items-center gap-2">
+										<button
+											type="button"
+											class="rounded-full bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
+											on:click={() => {
+												largeMessageExpanded = true;
+											}}
+										>
+											{$i18n.t('Render full response')}
+										</button>
+									</div>
+								</div>
+							{:else if isVoiceOnlyMessage}
+								<div class="rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+									{$i18n.t('Voice-only response ready. Use Read Aloud to play it.')}
+								</div>
+							{:else if displayContent && message.error !== true}
 								<!-- always show message contents even if there's an error -->
 								<!-- unless message.error === true which is legacy error handling, where the error message is stored in message.content -->
 								<ContentRenderer
@@ -767,12 +919,12 @@
 									messageId={message.id}
 									{history}
 									{selectedModels}
-									content={message.content}
+									content={displayContent}
 									sources={message.sources}
 									floatingButtons={message?.done &&
 										!readOnly &&
 										($settings?.showFloatingActionButtons ?? true)}
-									save={!readOnly}
+									save={!readOnly && typeof message.content === 'string'}
 									preview={!readOnly}
 									{editCodeBlock}
 									{topPadding}
@@ -794,17 +946,19 @@
 										addMessages({ modelId, parentId, messages });
 									}}
 									onSave={({ raw, oldContent, newContent }) => {
-										history.messages[message.id].content = history.messages[
-											message.id
-										].content.replace(raw, raw.replace(oldContent, newContent));
+										if (typeof history.messages[message.id].content === 'string') {
+											history.messages[message.id].content = history.messages[
+												message.id
+											].content.replace(raw, raw.replace(oldContent, newContent));
 
-										updateChat();
+											updateChat();
+										}
 									}}
 								/>
 							{/if}
 
 							{#if message?.error}
-								<Error content={message?.error?.content ?? message.content} />
+								<Error content={message?.error?.content ?? copyableContent} />
 							{/if}
 
 							{#if (message?.sources || message?.citations) && (model?.info?.meta?.capabilities?.citations ?? true)}
@@ -928,7 +1082,7 @@
 							{/if}
 
 							{#if message.done}
-								{#if !readOnly}
+								{#if !readOnly && typeof message.content === 'string'}
 									{#if $user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true}
 										<Tooltip content={$i18n.t('Edit')} placement="bottom">
 											<button
@@ -967,7 +1121,7 @@
 											? 'visible'
 											: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition copy-response-button"
 										on:click={() => {
-											copyToClipboard(message.content);
+											copyToClipboard(copyableContent);
 										}}
 									>
 										<svg
@@ -988,7 +1142,7 @@
 									</button>
 								</Tooltip>
 
-								{#if $user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)}
+								{#if ($user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)) && channelPlan.voiceText}
 									<Tooltip content={$i18n.t('Read Aloud')} placement="bottom">
 										<button
 											aria-label={$i18n.t('Read Aloud')}

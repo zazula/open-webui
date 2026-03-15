@@ -57,6 +57,7 @@
 		isYoutubeUrl
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import { planVoiceProtocolContent } from '$lib/utils/voiceProtocol';
 
 	import {
 		createNewChat,
@@ -1091,8 +1092,6 @@
 			const chatContent = chat.chat;
 
 			if (chatContent) {
-				console.log(chatContent);
-
 				selectedModels =
 					(chatContent?.models ?? undefined) !== undefined
 						? chatContent.models
@@ -1141,6 +1140,141 @@
 			}
 		}
 	};
+
+	const normalizeStaleCurrentAssistant = () => {
+		const normalizeErrorPayload = (error) => {
+			if (error === null || error === undefined || error === false) {
+				return null;
+			}
+
+			if (error === true) {
+				return true;
+			}
+
+			if (typeof error === 'string') {
+				return error.trim() ? error : null;
+			}
+
+			if (typeof error === 'object') {
+				const content = error?.content;
+				if (typeof content === 'string') {
+					const normalizedContent = content.trim();
+					return normalizedContent ? { ...error, content: normalizedContent } : null;
+				}
+
+				if (content && typeof content === 'object') {
+					return Object.values(content).some((value) => value && value !== '')
+						? error
+						: null;
+				}
+
+				if (content === null || content === undefined || content === false) {
+					const keys = Object.keys(error ?? {}).filter((key) => key !== 'content');
+					return keys.some((key) => {
+						const value = error[key];
+						return value !== null && value !== undefined && value !== false && value !== '';
+					})
+						? error
+						: null;
+				}
+
+				return error;
+			}
+
+			return error;
+		};
+
+		const normalizeOutputItems = (output, markCompleted = false) => {
+			if (!Array.isArray(output)) {
+				return output;
+			}
+
+			return output.map((item) => {
+				if (!item || typeof item !== 'object') {
+					return item;
+				}
+
+				if (markCompleted && item.status === 'in_progress') {
+					return {
+						...item,
+						status: 'completed'
+					};
+				}
+
+				return item;
+			});
+		};
+
+		const isAssistantLikeMessage = (message) => {
+			if (!message || typeof message !== 'object') {
+				return false;
+			}
+
+			const assistantKeys = [
+				'model',
+				'output',
+				'usage',
+				'error',
+				'selectedModelId',
+				'statusHistory',
+				'followUps',
+				'sources',
+				'annotation',
+				'arena'
+			];
+
+			return assistantKeys.some((key) => key in message) || message.parentId !== null;
+		};
+
+		if (!history?.messages) {
+			return;
+		}
+
+		for (const [messageId, message] of Object.entries(history.messages)) {
+			if (!message || typeof message !== 'object') {
+				continue;
+			}
+
+			if (!message.id) {
+				message.id = messageId;
+			}
+
+			if (!Array.isArray(message.childrenIds)) {
+				message.childrenIds = [];
+			}
+
+			if (!message.role && isAssistantLikeMessage(message)) {
+				message.role = 'assistant';
+			}
+
+			if ('error' in message) {
+				message.error = normalizeErrorPayload(message.error);
+				if (message.error === null) {
+					delete message.error;
+				}
+			}
+
+			if ('output' in message) {
+				message.output = normalizeOutputItems(message.output, message.done === true);
+			}
+
+			if (
+				message.role === 'assistant' &&
+				message.done !== true &&
+				!generating &&
+				!(taskIds?.length > 0) &&
+				Boolean(message.error || message.output || `${message.content ?? ''}`.trim())
+			) {
+				message.done = true;
+				message.output = normalizeOutputItems(message.output, true);
+				history.messages[message.id] = message;
+			}
+		}
+	};
+
+	$: if (history?.currentId) {
+		normalizeStaleCurrentAssistant();
+	}
 
 	const scrollToBottom = async (behavior = 'auto') => {
 		await tick();
@@ -1453,6 +1587,11 @@
 		if (content) {
 			// REALTIME_CHAT_SAVE is disabled
 			message.content = content;
+			const responseChannelPlan = planVoiceProtocolContent(
+				message.content,
+				$settings?.responseOutputChannel ?? 'both'
+			);
+			const ttsContent = responseChannelPlan.voiceText ?? responseChannelPlan.displayText ?? '';
 
 			if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
 				navigator.vibrate(5);
@@ -1460,7 +1599,7 @@
 
 			// Emit chat event for TTS
 			const messageContentParts = getMessageContentParts(
-				removeAllDetails(message.content),
+				removeAllDetails(ttsContent),
 				$config?.audio?.tts?.split_on ?? 'punctuation'
 			);
 			messageContentParts.pop();
@@ -1495,12 +1634,16 @@
 
 		if (done) {
 			message.done = true;
+			const responseChannelPlan = planVoiceProtocolContent(
+				message.content,
+				$settings?.responseOutputChannel ?? 'both'
+			);
 
 			if ($settings.responseAutoCopy) {
-				copyToClipboard(message.content);
+				copyToClipboard(responseChannelPlan.displayText ?? responseChannelPlan.voiceText ?? '');
 			}
 
-			if ($settings.responseAutoPlayback && !$showCallOverlay) {
+			if ($settings.responseAutoPlayback && !$showCallOverlay && responseChannelPlan.voiceText) {
 				await tick();
 				document.getElementById(`speak-button-${message.id}`)?.click();
 			}
@@ -1508,7 +1651,9 @@
 			// Emit chat event for TTS
 			let lastMessageContentPart =
 				getMessageContentParts(
-					removeAllDetails(message.content),
+					removeAllDetails(
+						responseChannelPlan.voiceText ?? responseChannelPlan.displayText ?? ''
+					),
 					$config?.audio?.tts?.split_on ?? 'punctuation'
 				)?.at(-1) ?? '';
 			if (lastMessageContentPart) {
@@ -1522,7 +1667,7 @@
 				new CustomEvent('chat:finish', {
 					detail: {
 						id: message.id,
-						content: message.content
+						content: responseChannelPlan.displayText ?? responseChannelPlan.voiceText ?? ''
 					}
 				})
 			);
@@ -1683,7 +1828,10 @@
 		}
 
 		let _chatId = JSON.parse(JSON.stringify($chatId));
-		_history = JSON.parse(JSON.stringify(_history));
+		const shouldInitNewChat =
+			newChat &&
+			parentId !== null &&
+			(_history.messages[parentId]?.parentId ?? null) === null;
 
 		const responseMessageIds: Record<PropertyKey, string> = {};
 		// If modelId is provided, use it, else use selected model
@@ -1730,15 +1878,15 @@
 		history = history;
 
 		// Create new chat if newChat is true and first user message
-		if (newChat && _history.messages[_history.currentId].parentId === null) {
+		if (shouldInitNewChat) {
 			_chatId = await initChatHandler(_history);
 		}
 
 		await tick();
 
-		_history = JSON.parse(JSON.stringify(history));
-		// Save chat after all messages have been created
-		await saveChatHandler(_chatId, _history);
+		const persistedHistory = history;
+		// Persist asynchronously so large chats don't block prompt dispatch.
+		void saveChatHandler(_chatId, persistedHistory);
 
 		await Promise.all(
 			selectedModelIds.map(async (modelId, _modelIdx) => {
@@ -1769,14 +1917,16 @@
 					let responseMessageId =
 						responseMessageIds[`${modelId}-${modelIdx ? modelIdx : _modelIdx}`];
 					const chatEventEmitter = await getChatEventEmitter(model.id, _chatId);
+					const messageHistory =
+						messages && messages.length > 0
+							? messages
+							: createMessagesList(persistedHistory, responseMessageId);
 
 					scrollToBottom();
 					await sendMessageSocket(
 						model,
-						messages && messages.length > 0
-							? messages
-							: createMessagesList(_history, responseMessageId),
-						_history,
+						messageHistory,
+						persistedHistory,
 						responseMessageId,
 						_chatId
 					);
@@ -1976,7 +2126,7 @@
 				model_item: $models.find((m) => m.id === model.id),
 
 				session_id: $socket?.id,
-				chat_id: $chatId,
+				chat_id: _chatId,
 
 				id: responseMessageId,
 				parent_id: userMessage?.id ?? null,

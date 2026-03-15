@@ -95,6 +95,16 @@ export const artifactContents = writable(null);
 
 export const embed = writable(null);
 
+export type VoiceInputState = {
+	muted: boolean;
+	autoMuted: boolean;
+};
+
+export const voiceInputState: Writable<VoiceInputState> = writable({
+	muted: false,
+	autoMuted: false
+});
+
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);
 export const currentChatPage = writable(1);
@@ -195,6 +205,7 @@ type Settings = {
 	speechAutoSend?: boolean;
 	speechAutoMute?: boolean;
 	responseAutoPlayback?: boolean;
+	responseOutputChannel?: 'both' | 'display' | 'voice';
 	audio?: AudioSettings;
 	showUsername?: boolean;
 	notificationEnabled?: boolean;
