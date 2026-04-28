@@ -77,6 +77,14 @@ def is_valid_model_id(model_id: str) -> bool:
     return model_id and len(model_id) <= 256
 
 
+def normalize_tag_name(tag) -> Optional[str]:
+    if isinstance(tag, str):
+        return tag
+    if isinstance(tag, dict):
+        return tag.get("name")
+    return None
+
+
 ###########################
 # GetModels
 # Let each model here be judged by what it does and not
@@ -183,7 +191,10 @@ async def get_model_tags(user=Depends(get_verified_user), db: AsyncSession = Dep
         is_admin=(user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL),
         db=db,
     )
-    return sorted(tags)
+    normalized_tags = {
+        tag_name for tag in tags if (tag_name := normalize_tag_name(tag))
+    }
+    return sorted(normalized_tags)
 
 
 ############################

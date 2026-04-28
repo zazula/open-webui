@@ -64,6 +64,7 @@ from open_webui.utils.session_pool import (
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.utils.anthropic import is_anthropic_url, get_anthropic_models
+from open_webui.socket.utils import RedisDict
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +154,68 @@ def openai_reasoning_model_handler(payload):
             payload['messages'][0]['role'] = 'developer'
 
     return payload
+
+
+def _set_openai_models_cache(request: Request, models: dict):
+    if isinstance(request.app.state.OPENAI_MODELS, RedisDict):
+        request.app.state.OPENAI_MODELS.set(models)
+    else:
+        request.app.state.OPENAI_MODELS = models
+
+
+def _get_cached_openai_model_from_unified_state(request: Request, model_id: str):
+    unified_models = request.app.state.MODELS
+    if not unified_models:
+        return None
+
+    model = unified_models.get(model_id)
+    if model and model.get("owned_by") == "openai" and model.get("urlIdx") is not None:
+        return model
+
+    info = (model or {}).get("info", {}) or {}
+    base_model_id = info.get("base_model_id")
+    if not base_model_id:
+        return None
+
+    base_model = unified_models.get(base_model_id)
+    if (
+        base_model
+        and base_model.get("owned_by") == "openai"
+        and base_model.get("urlIdx") is not None
+    ):
+        return {
+            **base_model,
+            "id": model_id,
+            "name": (model or {}).get("name", model_id),
+            "info": info or base_model.get("info"),
+            "preset": (model or {}).get("preset", False),
+        }
+
+    return None
+
+
+async def resolve_openai_model(request: Request, model_id: Optional[str], user: UserModel):
+    if not model_id:
+        return None
+
+    models = request.app.state.OPENAI_MODELS
+    model = models.get(model_id) if models else None
+    if model:
+        return model
+
+    model = _get_cached_openai_model_from_unified_state(request, model_id)
+    if model:
+        return model
+
+    response = await get_all_models(request, user=user)
+    refreshed_models = {
+        model["id"]: model for model in response.get("data", []) if model.get("id")
+    }
+    _set_openai_models_cache(request, refreshed_models)
+
+    return refreshed_models.get(model_id) or _get_cached_openai_model_from_unified_state(
+        request, model_id
+    )
 
 
 async def get_headers_and_cookies(
@@ -459,7 +522,16 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
                 if connection_type:
                     model['connection_type'] = connection_type
 
-    log.debug(f'get_all_models:responses() {responses}')
+    response_counts = [
+        len(response.get('data', []))
+        for response in responses
+        if isinstance(response, dict)
+    ]
+    log.debug(
+        'get_all_models:responses() fetched %s response payload(s) with model counts=%s',
+        len(responses),
+        response_counts,
+    )
     return responses
 
 
@@ -1084,11 +1156,7 @@ async def generate_chat_completion(
         await check_model_access(user, None, bypass_filter)
 
     # Check if model is already in app state cache to avoid expensive get_all_models() call
-    models = request.app.state.OPENAI_MODELS
-    if not models or model_id not in models:
-        await get_all_models(request, user=user)
-        models = request.app.state.OPENAI_MODELS
-    model = models.get(model_id)
+    model = await resolve_openai_model(request, model_id, user)
 
     if model:
         idx = model['urlIdx']
@@ -1280,12 +1348,9 @@ async def embeddings(request: Request, form_data: dict, user):
     # Find correct backend url/key based on model
     model_id = form_data.get('model')
     # Check if model is already in app state cache to avoid expensive get_all_models() call
-    models = request.app.state.OPENAI_MODELS
-    if not models or model_id not in models:
-        await get_all_models(request, user=user)
-        models = request.app.state.OPENAI_MODELS
-    if model_id in models:
-        idx = models[model_id]['urlIdx']
+    model = await resolve_openai_model(request, model_id, user)
+    if model:
+        idx = model['urlIdx']
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
@@ -1382,12 +1447,9 @@ async def responses(
     body = json.dumps(payload)
 
     if model_id:
-        models = request.app.state.OPENAI_MODELS
-        if not models or model_id not in models:
-            await get_all_models(request, user=user)
-            models = request.app.state.OPENAI_MODELS
-        if model_id in models:
-            idx = models[model_id]['urlIdx']
+        model = await resolve_openai_model(request, model_id, user)
+        if model:
+            idx = model['urlIdx']
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
@@ -1491,12 +1553,9 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     idx = 0
     model_id = payload.get('model') if isinstance(payload, dict) else None
     if model_id:
-        models = request.app.state.OPENAI_MODELS
-        if not models or model_id not in models:
-            await get_all_models(request, user=user)
-            models = request.app.state.OPENAI_MODELS
-        if model_id in models:
-            idx = models[model_id]['urlIdx']
+        model = await resolve_openai_model(request, model_id, user)
+        if model:
+            idx = model['urlIdx']
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]

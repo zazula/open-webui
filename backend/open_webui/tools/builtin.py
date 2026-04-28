@@ -2065,17 +2065,36 @@ async def query_knowledge_files(
         except ValueError:
             count = 5  # Default fallback
 
-    # Handle knowledge_ids being string "None", "null", or empty
-    if isinstance(knowledge_ids, str):
-        if knowledge_ids.lower() in ('none', 'null', ''):
-            knowledge_ids = None
-        else:
-            # Try to parse as JSON array if it looks like one
-            try:
-                knowledge_ids = json.loads(knowledge_ids)
-            except json.JSONDecodeError:
-                # Treat as single ID
-                knowledge_ids = [knowledge_ids]
+    def _flatten_knowledge_ids(value) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.lower() in ('none', 'null', ''):
+                return []
+
+            if stripped.startswith('[') or stripped.startswith('{'):
+                try:
+                    return _flatten_knowledge_ids(json.loads(stripped))
+                except json.JSONDecodeError:
+                    pass
+
+            return [stripped]
+
+        if isinstance(value, (list, tuple, set)):
+            items = []
+            for item in value:
+                items.extend(_flatten_knowledge_ids(item))
+            return items
+
+        return [str(value).strip()]
+
+    normalized_knowledge_ids = []
+    for knowledge_id in _flatten_knowledge_ids(knowledge_ids):
+        if knowledge_id and knowledge_id not in normalized_knowledge_ids:
+            normalized_knowledge_ids.append(knowledge_id)
+    knowledge_ids = normalized_knowledge_ids or None
 
     try:
         from open_webui.models.knowledge import Knowledges

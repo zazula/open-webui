@@ -599,6 +599,14 @@ logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
 
+def normalize_tag_name(tag):
+    if isinstance(tag, str):
+        return tag
+    if isinstance(tag, dict):
+        return tag.get("name")
+    return None
+
+
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         try:
@@ -1487,8 +1495,16 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
             model['info']['meta'].pop('profile_image_url', None)
 
         try:
-            model_tags = [tag.get('name') for tag in model.get('info', {}).get('meta', {}).get('tags', [])]
-            tags = [tag.get('name') for tag in model.get('tags', [])]
+            model_tags = [
+                tag_name
+                for tag in model.get('info', {}).get('meta', {}).get('tags', [])
+                if (tag_name := normalize_tag_name(tag))
+            ]
+            tags = [
+                tag_name
+                for tag in model.get('tags', [])
+                if (tag_name := normalize_tag_name(tag))
+            ]
 
             tags = list(set(model_tags + tags))
             model['tags'] = [{'name': tag} for tag in tags]
@@ -1512,9 +1528,7 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
 
     models = await get_filtered_models(models, user)
 
-    log.debug(
-        f'/api/models returned filtered models accessible to the user: {json.dumps([model.get("id") for model in models])}'
-    )
+    log.debug('/api/models returned %s accessible model(s)', len(models))
     return {'data': models}
 
 

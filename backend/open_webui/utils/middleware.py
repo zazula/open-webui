@@ -917,9 +917,11 @@ def handle_responses_streaming_event(
 
         new_output = final_output if final_output is not None else current_output
 
-        # Ensure reasoning items are marked as completed in the final output
+        # Final completed responses should not retain in-progress output items.
         if new_output:
             for item in new_output:
+                if item.get('status') == 'in_progress':
+                    item['status'] = 'completed'
                 if item.get('type') == 'reasoning' and item.get('status') != 'completed':
                     item['status'] = 'completed'
 

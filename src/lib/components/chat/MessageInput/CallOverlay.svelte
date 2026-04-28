@@ -1,5 +1,13 @@
 <script lang="ts">
-	import { config, isApp, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
+	import {
+		config,
+		isApp,
+		models,
+		settings,
+		showCallOverlay,
+		TTSWorker,
+		voiceInputState
+	} from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 
 	const dispatch = createEventDispatcher();
@@ -12,6 +20,7 @@
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import VideoInputMenu from './CallOverlay/VideoInputMenu.svelte';
+	import MicSolid from '$lib/components/icons/MicSolid.svelte';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
@@ -48,6 +57,33 @@
 	let supportsBrowserStt = false;
 	let useWebStt = false;
 	let speechEndResolver = null;
+
+	let micManualMuted = false;
+	let micAutoMuted = false;
+
+	const isMicCaptureMuted = () => micManualMuted || micAutoMuted;
+
+	$: isMuted = micManualMuted || micAutoMuted;
+	$: statusText = (() => {
+		if (loading) {
+			return $i18n.t('Thinking...');
+		}
+		if (isMuted) {
+			return micAutoMuted ? $i18n.t('Microphone auto-muted') : $i18n.t('Microphone muted');
+		}
+		if (assistantSpeaking) {
+			return $i18n.t('Tap to interrupt');
+		}
+		return $i18n.t('Listening...');
+	})();
+	$: muteButtonLabel = isMuted ? $i18n.t('Unmute microphone') : $i18n.t('Mute microphone');
+	$: muteIndicatorText = micAutoMuted ? $i18n.t('Auto-muted') : $i18n.t('Muted');
+	$: muteButtonClasses = isMuted
+		? 'bg-red-600 text-white border-red-600 ring-2 ring-red-200/80 dark:ring-red-900/50 hover:bg-red-500'
+		: 'bg-gray-200 text-gray-900 dark:bg-gray-800 dark:text-white border-gray-300 dark:border-gray-700 hover:bg-gray-300 dark:hover:bg-gray-700';
+	$: muteIndicatorClasses = isMuted
+		? 'text-red-100/90 dark:text-red-100/90'
+		: 'text-gray-500 dark:text-gray-400';
 
 	const waitForSpeechRecognitionEnd = () =>
 		new Promise((resolve) => {
@@ -184,6 +220,8 @@
 
 	const MIN_DECIBELS = -55;
 	const VISUALIZER_BUFFER_LENGTH = 300;
+	const SPEECH_RMS_THRESHOLD = 0.03;
+	const SILENCE_TIMEOUT_MS = 2000;
 
 	const transcribeHandler = async (audioBlob) => {
 		// Create a blob from the audio chunks
@@ -220,7 +258,7 @@
 			audioChunks = [];
 			mediaRecorder = false;
 
-			if (_continue) {
+			if (_continue && !isMicCaptureMuted()) {
 				startRecording();
 			}
 
@@ -341,6 +379,20 @@
 		}
 	};
 
+	const pauseMicCapture = async () => {
+		try {
+			if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+				mediaRecorder.stop();
+			} else {
+				mediaRecorder = false;
+			}
+		} catch (error) {
+			console.log('Error pausing mic capture:', error);
+		}
+
+		await stopSpeechRecognition();
+	};
+
 	const stopAudioStream = async () => {
 		try {
 			if (mediaRecorder) {
@@ -407,11 +459,10 @@
 				analyser.getByteTimeDomainData(timeDomainData);
 				analyser.getByteFrequencyData(domainData);
 
-				// Calculate RMS level from time domain data
+				// RMS is a better speech signal than raw frequency-bin presence, which often
+				// never reaches absolute zero on live microphone streams.
 				rmsLevel = calculateRMS(timeDomainData);
-
-				// Check if initial speech/noise has started
-				const hasSound = domainData.some((value) => value > 0);
+				const hasSound = rmsLevel >= SPEECH_RMS_THRESHOLD;
 				if (hasSound) {
 					// BIG RED TEXT
 					console.log('%c%s', 'color: red; font-size: 20px;', '🔊 Sound detected');
@@ -427,16 +478,16 @@
 					lastSoundTime = Date.now();
 				}
 
-				// Start silence detection only after initial speech/noise has been detected
-				if (hasStartedSpeaking) {
-					if (Date.now() - lastSoundTime > 2000) {
-						confirmed = true;
+				// Start silence detection only after initial speech has been detected.
+				if (hasStartedSpeaking && Date.now() - lastSoundTime > SILENCE_TIMEOUT_MS) {
+					confirmed = true;
+					micAutoMuted = true;
+					micManualMuted = false;
 
-						if (mediaRecorder) {
-							console.log('%c%s', 'color: red; font-size: 20px;', '🔇 Silence detected');
-							mediaRecorder.stop();
-							return;
-						}
+					if (mediaRecorder) {
+						console.log('%c%s', 'color: red; font-size: 20px;', '🔇 Silence detected');
+						mediaRecorder.stop();
+						return;
 					}
 				}
 
@@ -529,8 +580,8 @@
 	};
 
 	const stopAllAudio = async () => {
-		assistantSpeaking = false;
-		interrupted = true;
+  assistantSpeaking = false;
+  interrupted = true;
 
 		if (chatStreaming) {
 			stopResponse();
@@ -658,6 +709,28 @@
 		console.log(`Audio monitoring and playing stopped for message ID ${id}`);
 	};
 
+	const applyAutoMute = async () => {
+		micAutoMuted = true;
+		micManualMuted = false;
+	};
+
+	const handleMicToggle = async () => {
+		if (isMicCaptureMuted()) {
+			micManualMuted = false;
+			micAutoMuted = false;
+			await startRecording();
+		} else {
+			micManualMuted = true;
+			micAutoMuted = false;
+			await pauseMicCapture();
+		}
+	};
+
+	$: voiceInputState.set({
+		muted: micManualMuted || micAutoMuted,
+		autoMuted: micAutoMuted
+	});
+
 	const chatStartHandler = async (e) => {
 		const { id } = e.detail;
 
@@ -675,6 +748,7 @@
 			assistantSpeaking = true;
 			// Start monitoring and playing audio for the message ID
 			monitorAndPlayAudio(id, audioAbortController.signal);
+			await applyAutoMute();
 		}
 	};
 
@@ -1049,17 +1123,27 @@
 						}
 					}}
 				>
-					<div class=" line-clamp-1 text-sm font-medium">
-						{#if loading}
-							{$i18n.t('Thinking...')}
-						{:else if assistantSpeaking}
-							{$i18n.t('Tap to interrupt')}
-						{:else}
-							{$i18n.t('Listening...')}
-						{/if}
-					</div>
-				</button>
-			</div>
+	<div class="line-clamp-1 text-sm font-medium">
+		{statusText}
+	</div>
+		</button>
+	</div>
+	<div>
+		<button
+			type="button"
+			class={`px-3 py-2 rounded-full border transition flex items-center gap-2 ${muteButtonClasses}`}
+			on:click={handleMicToggle}
+			aria-label={muteButtonLabel}
+		>
+				<MicSolid class="size-4" />
+				<div class="text-left leading-tight">
+					<div class="text-xs font-semibold">{muteButtonLabel}</div>
+					{#if isMuted}
+						<div class={`text-[11px] ${muteIndicatorClasses}`}>{muteIndicatorText}</div>
+					{/if}
+				</div>
+			</button>
+	</div>
 
 			<div>
 				<button

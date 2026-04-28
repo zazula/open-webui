@@ -180,6 +180,7 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
             owned_by = 'openai'
             connection_type = None
             pipe = None
+            url_idx = None
 
             base_model = base_model_lookup.get(custom_model.base_model_id)
             if base_model is None:
@@ -189,6 +190,7 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
                 if 'pipe' in base_model:
                     pipe = base_model['pipe']
                 connection_type = base_model.get('connection_type', None)
+                url_idx = base_model.get('urlIdx', None)
 
             model = {
                 'id': f'{custom_model.id}',
@@ -198,6 +200,7 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
                 'owned_by': owned_by,
                 'connection_type': connection_type,
                 'preset': True,
+                **({'urlIdx': url_idx} if url_idx is not None else {}),
                 **({'pipe': pipe} if pipe is not None else {}),
             }
 
@@ -279,6 +282,11 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
     all_function_ids.update(global_filter_ids)
 
     functions_by_id = {f.id: f for f in await Functions.get_functions_by_ids(list(all_function_ids))}
+    active_functions_by_id = {
+        function_id: function
+        for function_id, function in functions_by_id.items()
+        if function.is_active
+    }
 
     # Pre-warm the function module cache once per unique function ID.
     # This ensures each function's DB freshness check runs exactly once,
@@ -287,7 +295,7 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
     # imported/custom model configs may reference tools or filters the user
     # hasn't installed, and trying to load those would cause persistent
     # "Failed to load function module" log spam on every model refresh.
-    for function_id, function in functions_by_id.items():
+    for function_id, function in active_functions_by_id.items():
         try:
             await get_function_module_from_cache(request, function_id, function=function)
         except Exception as e:
