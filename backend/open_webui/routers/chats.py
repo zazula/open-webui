@@ -1065,9 +1065,29 @@ async def unarchive_all_chats(
 async def get_shared_chat_by_id(
     share_id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
 ):
-    if user.role == "pending":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND
+    if user.role == 'pending':
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    chat = await Chats.get_chat_by_share_id(share_id, db=db)
+
+    # Admin chat access historically allowed looking up a chat by id through
+    # this route. Keep that fallback, but prefer share_id lookup so admins can
+    # open normal /s/<share_id> links too.
+    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+        chat = await Chats.get_chat_by_id(share_id, db=db)
+
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    # Look up the original chat_id to check access grants
+    shared = await SharedChats.get_by_id(share_id, db=db)
+    if shared:
+        has_grant = await AccessGrants.has_access(
+            user_id=user.id,
+            resource_type='shared_chat',
+            resource_id=shared.chat_id,
+            permission='read',
+            db=db,
         )
 
     return ChatResponse(**(await _prepare_chat_response(chat, db=db)))
