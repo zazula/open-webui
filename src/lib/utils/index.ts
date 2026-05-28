@@ -930,6 +930,9 @@ export const removeAllDetails = (content) => {
 	// (replaceOutsideCode splits on ``` fences, which breaks the <details>
 	// regex when the opening and closing tags land in different segments.)
 	content = content.replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '');
+	// claude-fix:strip-media-tags-from-tts - drop <audio>/<video>/<iframe> blocks (hold base64 data URIs from tts_auto_speak inline)
+	content = content.replace(/<(audio|video|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+	content = content.replace(/<(audio|video|iframe|source|track|img)\b[^>]*\/?>/gi, '');
 	// Second pass: catch any remaining blocks that live outside code fences
 	return replaceOutsideCode(content, (segment) => {
 		return segment.replace(/<details[^>]*>.*?<\/details>/gis, '');
