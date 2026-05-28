@@ -1023,10 +1023,13 @@ async def get_shared_chat_by_id(
     if user.role == 'pending':
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
-    if user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    chat = await Chats.get_chat_by_share_id(share_id, db=db)
+
+    # Admin chat access historically allowed looking up a chat by id through
+    # this route. Keep that fallback, but prefer share_id lookup so admins can
+    # open normal /s/<share_id> links too.
+    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(share_id, db=db)
-    else:
-        chat = await Chats.get_chat_by_share_id(share_id, db=db)
 
     if not chat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
