@@ -1681,9 +1681,18 @@
 					}
 
 					// Emit chat event for TTS (only when call overlay is active)
+					// claude-fix:streaming-tts-via-voice-protocol — route streaming TTS through planVoiceProtocolContent
+					// (matches sites 2 and 3 below). Without this, every sentence in the
+					// raw stream got spoken — non-<speak> prose leaked into voice mode.
 					if ($showCallOverlay) {
+						const streamingPlan = planVoiceProtocolContent(
+							message.content,
+							$settings?.responseOutputChannel ?? 'both'
+						);
+						const streamingTtsContent =
+							streamingPlan.voiceText ?? streamingPlan.displayText ?? '';
 						const messageContentParts = getMessageContentParts(
-							removeAllDetails(message.content),
+							removeAllDetails(streamingTtsContent),
 							$config?.audio?.tts?.split_on ?? 'punctuation'
 						);
 						messageContentParts.pop();
