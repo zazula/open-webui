@@ -860,6 +860,44 @@ def is_openai_new_model(model: str) -> bool:
     return False
 
 
+def is_zai_glm_chat_completion(url: str, model: str) -> bool:
+    model_lower = (model or '').lower()
+    url_lower = (url or '').lower()
+    return 'api.z.ai' in url_lower and model_lower.startswith('glm-')
+
+
+def payload_has_reasoning_content(messages: list[dict]) -> bool:
+    return any(
+        isinstance(message, dict) and bool(message.get('reasoning_content'))
+        for message in messages or []
+    )
+
+
+def apply_zai_glm_reasoning_and_tool_params(payload: dict) -> dict:
+    """Apply Z.AI GLM-specific knobs for preserved thinking and streamed tools.
+
+    Z.AI's API defaults to clearing historical reasoning. When Open WebUI
+    replays a tool-call turn with assistant.reasoning_content, set
+    thinking.clear_thinking=false so GLM preserves the reasoning chain in the
+    required top-level field instead of treating <think> tags as visible text.
+    """
+    messages = payload.get('messages') or []
+
+    if payload_has_reasoning_content(messages):
+        thinking = payload.get('thinking')
+        if not isinstance(thinking, dict):
+            thinking = {}
+
+        thinking.setdefault('type', 'enabled')
+        thinking['clear_thinking'] = False
+        payload['thinking'] = thinking
+
+    if payload.get('stream') and payload.get('tools') and payload.get('tool_stream') is None:
+        payload['tool_stream'] = True
+
+    return payload
+
+
 def _sanitize_model_for_url(model: str) -> str:
     """Sanitize a model name before interpolating it into a URL path.
 
@@ -1253,6 +1291,9 @@ async def generate_chat_completion(
                 message['content'] = ''.join(
                     part.get('text', '') for part in message['content'] if part.get('type') in ('input_text', 'text')
                 )
+
+    if not is_responses and is_zai_glm_chat_completion(url, payload.get('model', '')):
+        payload = apply_zai_glm_reasoning_and_tool_params(payload)
 
     payload = json.dumps(payload)
 

@@ -2167,7 +2167,114 @@ async def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[
     return [{k: v for k, v in msg.items() if k in ('role', 'content', 'output', 'files')} for msg in db_messages]
 
 
-def process_messages_with_output(messages: list[dict]) -> list[dict]:
+def get_reasoning_replay_format(model_id: str | None, model: dict | None = None) -> str:
+    normalized_model_id = (model_id or '').lower()
+    model = model if isinstance(model, dict) else {}
+    owned_by = (model.get('owned_by') or '').lower()
+    upstream_owned_by = (model.get('openai', {}).get('owned_by') or '').lower()
+
+    if owned_by == 'ollama':
+        return 'thinking'
+
+    if (
+        normalized_model_id.startswith('z.ai.glm')
+        or normalized_model_id.startswith('glm-')
+        or '.glm-' in normalized_model_id
+        or upstream_owned_by == 'z-ai'
+    ):
+        return 'field'
+
+    if 'minimax' in normalized_model_id:
+        return 'tags'
+
+    return 'tags'
+
+
+def is_minimax_model(model_id: str | None, model: dict | None = None) -> bool:
+    normalized_model_id = (model_id or '').lower()
+    model = model if isinstance(model, dict) else {}
+    upstream_model_id = (model.get('openai', {}).get('id') or '').lower()
+    upstream_root = (model.get('openai', {}).get('root') or '').lower()
+
+    return any('minimax' in value for value in (normalized_model_id, upstream_model_id, upstream_root))
+
+
+def ensure_minimax_tool_continuation_budget(form_data: dict, model_id: str | None, model: dict | None = None) -> dict:
+    if not is_minimax_model(model_id, model):
+        return form_data
+
+    # MiniMax M2 interleaved thinking often spends the first dozens of tokens
+    # after a tool result on reasoning.  Small continuation budgets can end
+    # before any visible content is emitted, which looks like the model stopped
+    # at the tool result.
+    min_budget = 256
+    for key in ('max_tokens', 'max_completion_tokens'):
+        value = form_data.get(key)
+        if isinstance(value, int) and value > 0:
+            form_data[key] = max(value, min_budget)
+
+    return form_data
+
+
+def normalize_tool_result_content_for_llm(tool_function_name: str, tool_result) -> str:
+    tool_name = tool_function_name or 'tool'
+
+    if tool_result is None:
+        return json.dumps(
+            {
+                'status': 'empty',
+                'tool': tool_name,
+                'message': f'{tool_name} returned no content. Treat this as an empty result and continue without retrying the identical tool call.',
+            },
+            ensure_ascii=False,
+        )
+
+    content = str(tool_result)
+    if not content.strip():
+        return json.dumps(
+            {
+                'status': 'empty',
+                'tool': tool_name,
+                'message': f'{tool_name} returned an empty response. Treat this as an empty result and continue without retrying the identical tool call.',
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict) and 'error' in parsed and 'status' not in parsed:
+        return json.dumps(
+            {
+                'status': 'error',
+                'tool': tool_name,
+                'message': parsed.get('error'),
+                'raw': parsed,
+                'instruction': 'Do not retry the identical tool call unless changing parameters is likely to fix the error. Continue by explaining the limitation or using available context.',
+            },
+            ensure_ascii=False,
+        )
+
+    if content.lower().startswith(('error:', 'http error')):
+        return json.dumps(
+            {
+                'status': 'error',
+                'tool': tool_name,
+                'message': content,
+                'instruction': 'Do not retry the identical tool call unless changing parameters is likely to fix the error. Continue by explaining the limitation or using available context.',
+            },
+            ensure_ascii=False,
+        )
+
+    return content
+
+
+def process_messages_with_output(
+    messages: list[dict],
+    reasoning_format: str = 'tags',
+) -> list[dict]:
     """
     Process messages with OR-aligned output items for LLM consumption.
 
@@ -2179,7 +2286,11 @@ def process_messages_with_output(messages: list[dict]) -> list[dict]:
     for message in messages:
         if message.get('role') == 'assistant' and message.get('output'):
             # Use output items for clean OpenAI-format messages
-            output_messages = convert_output_to_messages(message['output'], raw=True)
+            output_messages = convert_output_to_messages(
+                message['output'],
+                raw=True,
+                reasoning_format=reasoning_format,
+            )
             if output_messages:
                 processed.extend(output_messages)
                 continue
@@ -2301,7 +2412,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 message.pop('files', None)
 
     # Process messages with OR-aligned output items for clean LLM messages
-    form_data['messages'] = process_messages_with_output(form_data.get('messages', []))
+    reasoning_replay_format = get_reasoning_replay_format(form_data.get('model'), model)
+    form_data['messages'] = process_messages_with_output(
+        form_data.get('messages', []),
+        reasoning_format=reasoning_replay_format,
+    )
 
     system_message = get_system_message(form_data.get('messages', []))
     if system_message:  # Chat Controls/User Settings
@@ -4578,7 +4693,10 @@ async def streaming_chat_response_handler(response, ctx):
                         results.append(
                             {
                                 'tool_call_id': tool_call_id,
-                                'content': str(tool_result) if tool_result else '',
+                                'content': normalize_tool_result_content_for_llm(
+                                    tool_function_name,
+                                    tool_result,
+                                ),
                                 **({'files': tool_result_files} if tool_result_files else {}),
                                 **({'embeds': tool_result_embeds} if tool_result_embeds else {}),
                             }
@@ -4713,15 +4831,28 @@ async def streaming_chat_response_handler(response, ctx):
                             'stream': True,
                             'metadata': metadata,
                         }
+                        new_form_data = ensure_minimax_tool_continuation_budget(
+                            new_form_data,
+                            model_id,
+                            model,
+                        )
 
                         if ENABLE_RESPONSES_API_STATEFUL and last_response_id:
                             system_message = get_system_message(form_data['messages'])
                             new_form_data['messages'] = (
                                 [system_message] if system_message else []
-                            ) + convert_output_to_messages(output, raw=True)
+                            ) + convert_output_to_messages(
+                                output,
+                                raw=True,
+                                reasoning_format=get_reasoning_replay_format(model_id, model),
+                            )
                             new_form_data['previous_response_id'] = last_response_id
                         else:
-                            tool_messages = convert_output_to_messages(output, raw=True)
+                            tool_messages = convert_output_to_messages(
+                                output,
+                                raw=True,
+                                reasoning_format=get_reasoning_replay_format(model_id, model),
+                            )
 
                             # Chat Completions providers don't support multimodal
                             # tool messages.  Extract images into a user message.
@@ -4938,9 +5069,18 @@ async def streaming_chat_response_handler(response, ctx):
                                 'metadata': metadata,
                                 'messages': [
                                     *form_data['messages'],
-                                    *convert_output_to_messages(output, raw=True),
+                                    *convert_output_to_messages(
+                                        output,
+                                        raw=True,
+                                        reasoning_format=get_reasoning_replay_format(model_id, model),
+                                    ),
                                 ],
                             }
+                            new_form_data = ensure_minimax_tool_continuation_budget(
+                                new_form_data,
+                                model_id,
+                                model,
+                            )
 
                             res = await generate_chat_completion(
                                 request,
