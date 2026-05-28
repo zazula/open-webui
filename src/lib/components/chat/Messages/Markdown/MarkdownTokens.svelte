@@ -17,6 +17,7 @@
 	import KatexRenderer from './KatexRenderer.svelte';
 	import AlertRenderer, { alertComponent } from './AlertRenderer.svelte';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import ToolCallDisplay from '$lib/components/common/ToolCallDisplay.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '$lib/components/icons/Download.svelte';
@@ -96,6 +97,68 @@
 			.trim();
 	};
 
+	const getInlineVisualizationDocument = (content: string) => {
+		const resizeScript = `<script>
+const sendHeight = () => {
+	const root = document.getElementById('inline-visualization-root');
+	if (!root) return;
+	const rect = root.getBoundingClientRect();
+	const height = Math.ceil(rect.height);
+	parent.postMessage({ type: 'iframe:height', height: height + 8 }, '*');
+};
+window.addEventListener('load', sendHeight);
+window.addEventListener('resize', sendHeight);
+if (window.ResizeObserver) {
+	const root = document.getElementById('inline-visualization-root');
+	if (root) new ResizeObserver(sendHeight).observe(root);
+}
+setTimeout(sendHeight, 50);
+setTimeout(sendHeight, 250);
+<\/script>`;
+
+		return `<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<style>
+		html, body {
+			margin: 0;
+			padding: 0;
+			min-height: 0;
+			height: auto;
+			overflow: hidden;
+			background: transparent;
+			color: inherit;
+			font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+		}
+		*, *::before, *::after { box-sizing: border-box; }
+		#inline-visualization-root {
+			display: flow-root;
+			width: 100%;
+			min-height: 0;
+			overflow: hidden;
+		}
+		svg {
+			display: block;
+			max-width: 100%;
+			height: auto;
+			margin: 0 auto;
+		}
+		canvas, img, video {
+			max-width: 100%;
+		}
+	</style>
+</head>
+<body>
+<div id="inline-visualization-root">
+${content}
+</div>
+${resizeScript}
+</body>
+</html>`;
+	};
+
 	$: displayTokens = getDisplayTokens(tokens);
 
 	const exportTableToCSVHandler = (token, tokenIdx = 0) => {
@@ -151,6 +214,19 @@
 				{onSourceClick}
 			/>
 		</svelte:element>
+	{:else if token.type === 'inline_visualization'}
+		<div class="my-3 overflow-hidden rounded-2xl border border-gray-100 dark:border-gray-850">
+			<FullHeightIframe
+				src={getInlineVisualizationDocument(token.text ?? '')}
+				title="Inline visualization"
+				initialHeight={420}
+				allowScripts={true}
+				allowForms={false}
+				allowSameOrigin={false}
+				allowPopups={false}
+				iframeClassName="w-full"
+			/>
+		</div>
 	{:else if token.type === 'code'}
 		{#if token.raw.includes('```')}
 			<CodeBlock

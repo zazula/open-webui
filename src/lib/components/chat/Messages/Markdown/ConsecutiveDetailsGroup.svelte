@@ -71,6 +71,15 @@
 		return result;
 	})();
 
+	function isInlineVisualizerEmbed(embed: string) {
+		return (
+			typeof embed === 'string' &&
+			(embed.includes('data-iv-build=') ||
+				embed.includes('iv[build]') ||
+				embed.includes('@@@VIZ-START'))
+		);
+	}
+
 	$: summaryText = (() => {
 		const parts = [];
 
@@ -169,7 +178,8 @@
 					args={embedItem.args}
 					allowScripts={true}
 					allowForms={$settings?.iframeSandboxAllowForms ?? false}
-					allowSameOrigin={$settings?.iframeSandboxAllowSameOrigin ?? false}
+					allowSameOrigin={isInlineVisualizerEmbed(embedItem.embed) ||
+						($settings?.iframeSandboxAllowSameOrigin ?? false)}
 					allowPopups={true}
 				/>
 			</div>

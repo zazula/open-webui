@@ -67,7 +67,35 @@
 		if (processed === lastParsedContent) return;
 		lastParsedContent = processed;
 
-		tokens = marked.lexer(processed);
+		tokens = parseInlineVisualizationTokens(processed);
+	};
+
+	const parseInlineVisualizationTokens = (value) => {
+		const visualizationBlock = /@@@VIZ-START\s*([\s\S]*?)@@@VIZ-END/g;
+		const parsedTokens = [];
+		let lastIndex = 0;
+		let match;
+
+		while ((match = visualizationBlock.exec(value)) !== null) {
+			const preceding = value.slice(lastIndex, match.index);
+			if (preceding) parsedTokens.push(...marked.lexer(preceding));
+
+			const visualization = (match[1] ?? '').trim();
+			if (visualization) {
+				parsedTokens.push({
+					type: 'inline_visualization',
+					raw: match[0],
+					text: visualization
+				});
+			}
+
+			lastIndex = match.index + match[0].length;
+		}
+
+		const remaining = value.slice(lastIndex);
+		if (remaining) parsedTokens.push(...marked.lexer(remaining));
+
+		return parsedTokens;
 	};
 
 	const updateHandler = (content) => {

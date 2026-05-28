@@ -724,6 +724,15 @@
 			contentContainerElement.removeEventListener('copy', contentCopyHandler);
 		}
 	});
+
+	function isInlineVisualizerEmbed(embed: string) {
+		return (
+			typeof embed === 'string' &&
+			(embed.includes('data-iv-build=') ||
+				embed.includes('iv[build]') ||
+				embed.includes('@@@VIZ-START'))
+		);
+	}
 </script>
 
 <DeleteConfirmDialog
@@ -817,7 +826,7 @@
 											src={embed}
 											allowScripts={true}
 											allowForms={true}
-											allowSameOrigin={$settings?.iframeSandboxAllowSameOrigin ?? false}
+											allowSameOrigin={isInlineVisualizerEmbed(embed) || ($settings?.iframeSandboxAllowSameOrigin ?? false)}
 											allowPopups={true}
 										/>
 									</div>
