@@ -1981,6 +1981,194 @@ async def convert_url_images_to_base64(form_data):
     return form_data
 
 
+async def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]:
+    """
+    Load the message chain from DB up to message_id,
+    keeping only LLM-relevant fields (role, content, output).
+    """
+    messages_map = await Chats.get_messages_map_by_chat_id(chat_id)
+    if not messages_map:
+        return None
+
+    db_messages = get_message_list(messages_map, message_id)
+    if not db_messages:
+        return None
+
+    return [{k: v for k, v in msg.items() if k in ('role', 'content', 'output', 'files')} for msg in db_messages]
+
+
+def get_reasoning_replay_format(model_id: str | None, model: dict | None = None) -> str:
+    normalized_model_id = (model_id or '').lower()
+    model = model if isinstance(model, dict) else {}
+    owned_by = (model.get('owned_by') or '').lower()
+    upstream_owned_by = (model.get('openai', {}).get('owned_by') or '').lower()
+
+    if owned_by == 'ollama':
+        return 'thinking'
+
+    if (
+        normalized_model_id.startswith('z.ai.glm')
+        or normalized_model_id.startswith('glm-')
+        or '.glm-' in normalized_model_id
+        or upstream_owned_by == 'z-ai'
+    ):
+        return 'field'
+
+    if 'minimax' in normalized_model_id:
+        return 'tags'
+
+    return 'tags'
+
+
+def is_minimax_model(model_id: str | None, model: dict | None = None) -> bool:
+    normalized_model_id = (model_id or '').lower()
+    model = model if isinstance(model, dict) else {}
+    upstream_model_id = (model.get('openai', {}).get('id') or '').lower()
+    upstream_root = (model.get('openai', {}).get('root') or '').lower()
+
+    return any('minimax' in value for value in (normalized_model_id, upstream_model_id, upstream_root))
+
+
+def ensure_minimax_tool_continuation_budget(form_data: dict, model_id: str | None, model: dict | None = None) -> dict:
+    if not is_minimax_model(model_id, model):
+        return form_data
+
+    # MiniMax M2 interleaved thinking often spends the first dozens of tokens
+    # after a tool result on reasoning.  Small continuation budgets can end
+    # before any visible content is emitted, which looks like the model stopped
+    # at the tool result.
+    min_budget = 256
+    for key in ('max_tokens', 'max_completion_tokens'):
+        value = form_data.get(key)
+        if isinstance(value, int) and value > 0:
+            form_data[key] = max(value, min_budget)
+
+    return form_data
+
+
+def normalize_tool_result_content_for_llm(tool_function_name: str, tool_result) -> str:
+    tool_name = tool_function_name or 'tool'
+
+    if tool_result is None:
+        return json.dumps(
+            {
+                'status': 'empty',
+                'tool': tool_name,
+                'message': f'{tool_name} returned no content. Treat this as an empty result and continue without retrying the identical tool call.',
+            },
+            ensure_ascii=False,
+        )
+
+    content = str(tool_result)
+    if not content.strip():
+        return json.dumps(
+            {
+                'status': 'empty',
+                'tool': tool_name,
+                'message': f'{tool_name} returned an empty response. Treat this as an empty result and continue without retrying the identical tool call.',
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict) and 'error' in parsed and 'status' not in parsed:
+        return json.dumps(
+            {
+                'status': 'error',
+                'tool': tool_name,
+                'message': parsed.get('error'),
+                'raw': parsed,
+                'instruction': 'Do not retry the identical tool call unless changing parameters is likely to fix the error. Continue by explaining the limitation or using available context.',
+            },
+            ensure_ascii=False,
+        )
+
+    if content.lower().startswith(('error:', 'http error')):
+        return json.dumps(
+            {
+                'status': 'error',
+                'tool': tool_name,
+                'message': content,
+                'instruction': 'Do not retry the identical tool call unless changing parameters is likely to fix the error. Continue by explaining the limitation or using available context.',
+            },
+            ensure_ascii=False,
+        )
+
+    return content
+
+
+def process_messages_with_output(
+    messages: list[dict],
+    reasoning_format: str = 'tags',
+) -> list[dict]:
+    """
+    Process messages with OR-aligned output items for LLM consumption.
+
+    For assistant messages with 'output' field, produces properly formatted
+    OpenAI-style messages (tool_calls + tool results). Strips 'output' before LLM.
+    """
+    processed = []
+
+    for message in messages:
+        if message.get('role') == 'assistant' and message.get('output'):
+            # Use output items for clean OpenAI-format messages
+            output_messages = convert_output_to_messages(
+                message['output'],
+                raw=True,
+                reasoning_format=reasoning_format,
+            )
+            if output_messages:
+                processed.extend(output_messages)
+                continue
+
+        # Strip 'output' field before adding (LLM shouldn't see it)
+        clean_message = {k: v for k, v in message.items() if k != 'output'}
+        processed.append(clean_message)
+
+    return processed
+
+
+SKILL_MENTION_RE = re.compile(r'<\$([^|>]+)\|?[^>]*>')
+
+
+def _get_text_parts(message: dict) -> list[str]:
+    """Return all text segments from a message's content."""
+    content = message.get('content')
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text']
+    return []
+
+
+def extract_skill_ids_from_messages(messages: list[dict]) -> set[str]:
+    """Extract skill IDs from <$skillId|label> mention tags in messages."""
+    ids: set[str] = set()
+    for message in messages:
+        for text in _get_text_parts(message):
+            ids.update(m.group(1) for m in SKILL_MENTION_RE.finditer(text))
+    return ids
+
+
+def strip_skill_mentions(messages: list[dict]) -> None:
+    """Strip <$skillId|label> mention tags from message content in-place."""
+    strip_re = re.compile(r'<\$[^>]+>')
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, str) and strip_re.search(content):
+            message['content'] = strip_re.sub('', content).strip()
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'text':
+                    text = part.get('text', '')
+                    if strip_re.search(text):
+                        part['text'] = strip_re.sub('', text).strip()
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
@@ -1989,7 +2177,49 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
 
-    system_message = get_system_message(form_data.get("messages", []))
+    # Load messages from DB when available — DB preserves structured 'output' items
+    # which the frontend strips, causing tool calls to be merged into content.
+    chat_id = metadata.get('chat_id')
+    user_message_id = metadata.get('user_message_id')
+
+    if chat_id and user_message_id and not chat_id.startswith('local:'):
+        db_messages = await load_messages_from_db(chat_id, user_message_id)
+        if db_messages:
+            system_message = get_system_message(form_data.get('messages', []))
+            form_data['messages'] = [system_message, *db_messages] if system_message else db_messages
+
+            # Inject image files into content as image_url parts (mirrors frontend logic)
+            for message in form_data['messages']:
+                image_files = [
+                    f
+                    for f in message.get('files', [])
+                    if f.get('type') == 'image' or (f.get('content_type') or '').startswith('image/')
+                ]
+                if message.get('role') == 'user' and image_files:
+                    text_content = message.get('content', '')
+                    if isinstance(text_content, str):
+                        message['content'] = [
+                            {'type': 'text', 'text': text_content},
+                            *[
+                                {
+                                    'type': 'image_url',
+                                    'image_url': {'url': f['url']},
+                                }
+                                for f in image_files
+                                if f.get('url')
+                            ],
+                        ]
+                # Strip files field — it's been incorporated into content
+                message.pop('files', None)
+
+    # Process messages with OR-aligned output items for clean LLM messages
+    reasoning_replay_format = get_reasoning_replay_format(form_data.get('model'), model)
+    form_data['messages'] = process_messages_with_output(
+        form_data.get('messages', []),
+        reasoning_format=reasoning_replay_format,
+    )
+
+    system_message = get_system_message(form_data.get('messages', []))
     if system_message:  # Chat Controls/User Settings
         try:
             form_data = apply_system_prompt_to_body(
@@ -3942,18 +4172,13 @@ async def process_chat_response(
 
                         results.append(
                             {
-                                "tool_call_id": tool_call_id,
-                                "content": tool_result or "",
-                                **(
-                                    {"files": tool_result_files}
-                                    if tool_result_files
-                                    else {}
+                                'tool_call_id': tool_call_id,
+                                'content': normalize_tool_result_content_for_llm(
+                                    tool_function_name,
+                                    tool_result,
                                 ),
-                                **(
-                                    {"embeds": tool_result_embeds}
-                                    if tool_result_embeds
-                                    else {}
-                                ),
+                                **({'files': tool_result_files} if tool_result_files else {}),
+                                **({'embeds': tool_result_embeds} if tool_result_embeds else {}),
                             }
                         )
 
@@ -4002,6 +4227,60 @@ async def process_chat_response(
                                 ),
                             ],
                         }
+                        new_form_data = ensure_minimax_tool_continuation_budget(
+                            new_form_data,
+                            model_id,
+                            model,
+                        )
+
+                        if ENABLE_RESPONSES_API_STATEFUL and last_response_id:
+                            system_message = get_system_message(form_data['messages'])
+                            new_form_data['messages'] = (
+                                [system_message] if system_message else []
+                            ) + convert_output_to_messages(
+                                output,
+                                raw=True,
+                                reasoning_format=get_reasoning_replay_format(model_id, model),
+                            )
+                            new_form_data['previous_response_id'] = last_response_id
+                        else:
+                            tool_messages = convert_output_to_messages(
+                                output,
+                                raw=True,
+                                reasoning_format=get_reasoning_replay_format(model_id, model),
+                            )
+
+                            # Chat Completions providers don't support multimodal
+                            # tool messages.  Extract images into a user message.
+                            image_urls = []
+                            for message in tool_messages:
+                                if message.get('role') == 'tool' and isinstance(message.get('content'), list):
+                                    text_parts = []
+                                    for part in message['content']:
+                                        if part.get('type') == 'input_text':
+                                            text_parts.append(part.get('text', ''))
+                                        elif part.get('type') == 'input_image':
+                                            image_urls.append(part.get('image_url', ''))
+                                    message['content'] = ''.join(text_parts)
+
+                            new_form_data['messages'] = [
+                                *form_data['messages'],
+                                *tool_messages,
+                            ]
+
+                            if image_urls:
+                                new_form_data['messages'].append(
+                                    {
+                                        'role': 'user',
+                                        'content': [
+                                            {
+                                                'type': 'text',
+                                                'text': 'Here are the images from the tool results above. Please analyze them.',
+                                            },
+                                            *[{'type': 'image_url', 'image_url': {'url': url}} for url in image_urls],
+                                        ],
+                                    }
+                                )
 
                         res = await generate_chat_completion(
                             request,
@@ -4170,18 +4449,23 @@ async def process_chat_response(
                         try:
                             new_form_data = {
                                 **form_data,
-                                "model": model_id,
-                                "stream": True,
-                                "messages": [
-                                    *form_data["messages"],
-                                    {
-                                        "role": "assistant",
-                                        "content": serialize_content_blocks(
-                                            content_blocks, raw=True
-                                        ),
-                                    },
+                                'model': model_id,
+                                'stream': True,
+                                'metadata': metadata,
+                                'messages': [
+                                    *form_data['messages'],
+                                    *convert_output_to_messages(
+                                        output,
+                                        raw=True,
+                                        reasoning_format=get_reasoning_replay_format(model_id, model),
+                                    ),
                                 ],
                             }
+                            new_form_data = ensure_minimax_tool_continuation_budget(
+                                new_form_data,
+                                model_id,
+                                model,
+                            )
 
                             res = await generate_chat_completion(
                                 request,

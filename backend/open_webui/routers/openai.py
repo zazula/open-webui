@@ -835,8 +835,69 @@ def get_azure_allowed_params(api_version: str) -> set[str]:
     return allowed_params
 
 
-def is_openai_reasoning_model(model: str) -> bool:
-    return model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
+def is_openai_new_model(model: str) -> bool:
+    model_lower = model.lower()
+    # o-series models (o1, o3, o4, o5, ...)
+    if re.match(r'^o\d+', model_lower):
+        return True
+    # gpt-N where N >= 5 (gpt-5, gpt-5.2, gpt-6, ...)
+    m = re.match(r'^gpt-(\d+)', model_lower)
+    if m and int(m.group(1)) >= 5:
+        return True
+    return False
+
+
+def is_zai_glm_chat_completion(url: str, model: str) -> bool:
+    model_lower = (model or '').lower()
+    url_lower = (url or '').lower()
+    return 'api.z.ai' in url_lower and model_lower.startswith('glm-')
+
+
+def payload_has_reasoning_content(messages: list[dict]) -> bool:
+    return any(
+        isinstance(message, dict) and bool(message.get('reasoning_content'))
+        for message in messages or []
+    )
+
+
+def apply_zai_glm_reasoning_and_tool_params(payload: dict) -> dict:
+    """Apply Z.AI GLM-specific knobs for preserved thinking and streamed tools.
+
+    Z.AI's API defaults to clearing historical reasoning. When Open WebUI
+    replays a tool-call turn with assistant.reasoning_content, set
+    thinking.clear_thinking=false so GLM preserves the reasoning chain in the
+    required top-level field instead of treating <think> tags as visible text.
+    """
+    messages = payload.get('messages') or []
+
+    if payload_has_reasoning_content(messages):
+        thinking = payload.get('thinking')
+        if not isinstance(thinking, dict):
+            thinking = {}
+
+        thinking.setdefault('type', 'enabled')
+        thinking['clear_thinking'] = False
+        payload['thinking'] = thinking
+
+    if payload.get('stream') and payload.get('tools') and payload.get('tool_stream') is None:
+        payload['tool_stream'] = True
+
+    return payload
+
+
+def _sanitize_model_for_url(model: str) -> str:
+    """Sanitize a model name before interpolating it into a URL path.
+
+    Rejects path traversal attempts (../, /, \\) and percent-encodes
+    the name so it is safe to use as a single URL path segment
+    (e.g. Azure deployment name).
+    """
+    if not model or '..' in model or '/' in model or '\\' in model:
+        raise HTTPException(
+            status_code=400,
+            detail='Invalid model name: must not be empty or contain path separators or traversal sequences',
+        )
+    return quote(model, safe='')
 
 
 def convert_to_azure_payload(url, payload: dict, api_version: str):
@@ -983,6 +1044,9 @@ async def generate_chat_completion(
         request_url = f"{request_url}/chat/completions?api-version={api_version}"
     else:
         request_url = f"{url}/chat/completions"
+
+    if not is_responses and is_zai_glm_chat_completion(url, payload.get('model', '')):
+        payload = apply_zai_glm_reasoning_and_tool_params(payload)
 
     payload = json.dumps(payload)
 
