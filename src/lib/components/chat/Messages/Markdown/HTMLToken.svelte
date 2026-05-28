@@ -36,15 +36,27 @@
 			{token.text}
 		{/if}
 	{:else if html && html.includes('<audio')}
-		{@const audio = html.match(/<audio[^>]*>([\s\S]*?)<\/audio>/)}
-		{@const audioSrc = audio && audio[1]}
+		<!-- claude-fix:audio-src-and-autoplay -->
+		{@const audioAttrMatch = token.text.match(/<audio[^>]*\ssrc=["']([^"']+)["'][^>]*>/i)}
+		{@const audioInnerMatch = !audioAttrMatch
+			? token.text.match(/<audio[^>]*>([\s\S]*?)<\/audio>/)
+			: null}
+		{@const rawAudioSrc =
+			(audioAttrMatch && audioAttrMatch[1]) ||
+			(audioInnerMatch && audioInnerMatch[1]) ||
+			''}
+		{@const audioSrc = /^(https?:\/\/|data:audio\/)/i.test(rawAudioSrc)
+			? rawAudioSrc.replaceAll('&amp;', '&')
+			: ''}
+		{@const audioAutoplay = /<audio[^>]*\sautoplay(?:[\s=>])/i.test(token.text)}
 		{#if audioSrc}
 			<!-- svelte-ignore a11y-media-has-caption -->
 			<audio
 				class="w-full my-2"
-				src={audioSrc.replaceAll('&amp;', '&')}
+				src={audioSrc}
 				title="Audio player"
 				controls
+				autoplay={audioAutoplay}
 			></audio>
 		{:else}
 			{token.text}
