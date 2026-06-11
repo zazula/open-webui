@@ -3,6 +3,7 @@ import json
 import logging
 import time
 from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 import asyncio
 from fastapi.responses import StreamingResponse
