@@ -17,7 +17,7 @@ from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
