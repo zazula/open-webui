@@ -31,7 +31,6 @@ from open_webui.config import (
 from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL, GLOBAL_LOG_LEVEL
 from open_webui.models.users import UserModel
 
-
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
@@ -193,18 +192,19 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
             connection_type = None
 
             pipe = None
+            url_idx = None
 
-            for m in models:
-                if (
-                    custom_model.base_model_id == m["id"]
-                    or custom_model.base_model_id == m["id"].split(":")[0]
-                ):
-                    owned_by = m.get("owned_by", "unknown")
-                    if "pipe" in m:
-                        pipe = m["pipe"]
-
-                    connection_type = m.get("connection_type", None)
-                    break
+            base_model = base_model_lookup.get(custom_model.base_model_id)
+            if base_model is None:
+                base_model = base_model_lookup.get(
+                    custom_model.base_model_id.split(":")[0]
+                )
+            if base_model:
+                owned_by = base_model.get("owned_by", "unknown")
+                if "pipe" in base_model:
+                    pipe = base_model["pipe"]
+                connection_type = base_model.get("connection_type", None)
+                url_idx = base_model.get("urlIdx", None)
 
             model = {
                 "id": f"{custom_model.id}",
@@ -214,6 +214,7 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
                 "owned_by": owned_by,
                 "connection_type": connection_type,
                 "preset": True,
+                **({"urlIdx": url_idx} if url_idx is not None else {}),
                 **({"pipe": pipe} if pipe is not None else {}),
             }
 
@@ -286,9 +287,77 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
             }
         ]
 
-    def get_function_module_by_id(function_id):
-        function_module, _, _ = get_function_module_from_cache(request, function_id)
-        return function_module
+    # Batch-prefetch all needed function records to avoid N+1 queries
+    all_function_ids = set()
+    for model in models:
+        all_function_ids.update(model.get("action_ids", []))
+        all_function_ids.update(model.get("filter_ids", []))
+    all_function_ids.update(global_action_ids)
+    all_function_ids.update(global_filter_ids)
+
+    functions_by_id = {
+        f.id: f for f in await Functions.get_functions_by_ids(list(all_function_ids))
+    }
+    active_functions_by_id = {
+        function_id: function
+        for function_id, function in functions_by_id.items()
+        if function.is_active
+    }
+
+    # Pre-warm the function module cache once per unique function ID.
+    # This ensures each function's DB freshness check runs exactly once,
+    # not once per (model × function) pair.
+    # Only attempt to load functions that actually exist in the local DB;
+    # imported/custom model configs may reference tools or filters the user
+    # hasn't installed, and trying to load those would cause persistent
+    # "Failed to load function module" log spam on every model refresh.
+    for function_id, function in active_functions_by_id.items():
+        try:
+            await get_function_module_from_cache(
+                request, function_id, function=function
+            )
+        except Exception as e:
+            log.debug(f"Failed to load function module for {function_id}: {e}")
+
+    # Apply global model defaults to all models
+    # Per-model overrides take precedence over global defaults
+    default_metadata = (
+        getattr(request.app.state.config, "DEFAULT_MODEL_METADATA", None) or {}
+    )
+
+    if default_metadata:
+        for model in models:
+            info = model.get("info")
+
+            if info is None:
+                model["info"] = {"meta": copy.deepcopy(default_metadata)}
+                continue
+
+            meta = info.setdefault("meta", {})
+            for key, value in default_metadata.items():
+                if key == "capabilities":
+                    # Merge capabilities: defaults as base, per-model overrides win
+                    existing = meta.get("capabilities") or {}
+                    meta["capabilities"] = {**value, **existing}
+                elif meta.get(key) is None:
+                    meta[key] = copy.deepcopy(value)
+
+    # Batch-fetch all function valves in one query to avoid N+1 DB hits
+    # inside get_action_priority (previously called per action × per model).
+    all_function_valves = await Functions.get_function_valves_by_ids(
+        list(all_function_ids)
+    )
+
+    def get_action_priority(action_id):
+        try:
+            function_module = request.app.state.FUNCTIONS.get(action_id)
+            if function_module and hasattr(function_module, "Valves"):
+                valves_db = all_function_valves.get(action_id)
+                valves = function_module.Valves(**(valves_db if valves_db else {}))
+                return getattr(valves, "priority", 0)
+        except Exception:
+            pass
+        return 0
 
     for model in models:
         action_ids = [

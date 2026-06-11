@@ -254,6 +254,172 @@ class ChatStatsExport(BaseModel):
 
 
 class ChatTable:
+    def _normalize_error_payload(self, error):
+        if error in (None, False):
+            return None
+
+        if error is True:
+            return error
+
+        if isinstance(error, str):
+            return error if error.strip() else None
+
+        if isinstance(error, dict):
+            content = error.get("content")
+            if isinstance(content, str):
+                content = content.strip()
+                return {**error, "content": content} if content else None
+
+            if isinstance(content, dict):
+                if any(value not in (None, "", [], {}) for value in content.values()):
+                    return error
+                return None
+
+            if content in (None, False, [], {}):
+                if any(
+                    key != "content" and value not in (None, "", [], {})
+                    for key, value in error.items()
+                ):
+                    return error
+                return None
+
+            return error
+
+        return error
+
+    def _normalize_output_items(
+        self, output: Optional[list], *, mark_completed: bool = False
+    ) -> Optional[list]:
+        if not isinstance(output, list):
+            return output
+
+        normalized_output = []
+        for item in output:
+            if not isinstance(item, dict):
+                normalized_output.append(item)
+                continue
+
+            normalized_item = dict(item)
+            if mark_completed and normalized_item.get("status") == "in_progress":
+                normalized_item["status"] = "completed"
+            normalized_output.append(normalized_item)
+
+        return normalized_output
+
+    def _has_terminal_payload(self, message: dict) -> bool:
+        if not isinstance(message, dict):
+            return False
+
+        content = message.get("content")
+        has_content = (
+            bool(content.strip())
+            if isinstance(content, str)
+            else content not in (None, "", [], {})
+        )
+
+        return bool(message.get("error") or message.get("output") or has_content)
+
+    def _is_assistant_like_message(self, message: dict) -> bool:
+        if not isinstance(message, dict):
+            return False
+
+        assistant_keys = {
+            "model",
+            "output",
+            "usage",
+            "error",
+            "selectedModelId",
+            "statusHistory",
+            "followUps",
+            "sources",
+            "annotation",
+            "arena",
+        }
+        return (
+            any(key in message for key in assistant_keys)
+            or message.get("parentId") is not None
+        )
+
+    def _normalize_message_payload(
+        self, message_id: str, message: dict, existing: Optional[dict] = None
+    ) -> dict:
+        existing = existing if isinstance(existing, dict) else {}
+        payload = {
+            **existing,
+            **(message if isinstance(message, dict) else {}),
+        }
+
+        payload["id"] = message_id
+
+        if not isinstance(payload.get("childrenIds"), list):
+            payload["childrenIds"] = list(payload.get("childrenIds") or [])
+
+        if isinstance(payload.get("content"), str):
+            payload["content"] = sanitize_text_for_db(payload["content"])
+
+        if "error" in payload:
+            payload["error"] = self._normalize_error_payload(payload.get("error"))
+            if payload["error"] is None:
+                payload.pop("error", None)
+
+        if "output" in payload:
+            payload["output"] = self._normalize_output_items(
+                payload.get("output"),
+                mark_completed=payload.get("done") is True,
+            )
+
+        if not isinstance(payload.get("timestamp"), (int, float)):
+            payload["timestamp"] = int(time.time())
+
+        role = payload.get("role")
+        if role is None and self._is_assistant_like_message(payload):
+            payload["role"] = "assistant"
+        elif role is None and "content" in payload and payload.get("parentId") is None:
+            payload["role"] = "user"
+
+        if payload.get("role") == "assistant" and "done" not in payload:
+            payload["done"] = bool(payload.get("error"))
+        elif payload.get("role") == "user" and "done" not in payload:
+            payload["done"] = True
+
+        if payload.get("done") is True and "output" in payload:
+            payload["output"] = self._normalize_output_items(
+                payload.get("output"), mark_completed=True
+            )
+
+        return payload
+
+    def _normalize_chat_payload(
+        self, chat: dict, *, force_current: bool = False
+    ) -> dict:
+        payload = self._clean_null_bytes(chat)
+        history = payload.get("history")
+        if not isinstance(history, dict):
+            return payload
+
+        messages = history.get("messages")
+        if not isinstance(messages, dict):
+            return payload
+
+        current_id = history.get("currentId")
+        for message_id, message in list(messages.items()):
+            normalized = self._normalize_message_payload(message_id, message)
+
+            if (
+                force_current
+                and message_id == current_id
+                and normalized.get("role") == "assistant"
+                and normalized.get("done") is not True
+                and self._has_terminal_payload(normalized)
+            ):
+                normalized["done"] = True
+
+            messages[message_id] = normalized
+
+        history["messages"] = messages
+        payload["history"] = history
+        return payload
+
     def _clean_null_bytes(self, obj):
         """Recursively remove null bytes from strings in dict/list structures."""
         return sanitize_data_for_db(obj)
@@ -354,9 +520,11 @@ class ChatTable:
         self, id: str, chat: dict, db: Optional[Session] = None
     ) -> Optional[ChatModel]:
         try:
-            with get_db_context(db) as db:
-                chat_item = db.get(Chat, id)
-                chat_item.chat = self._clean_null_bytes(chat)
+            async with get_async_db_context(db) as db:
+                chat_item = await db.get(Chat, id)
+                if chat_item is None:
+                    return None
+                chat_item.chat = self._normalize_chat_payload(chat, force_current=True)
                 chat_item.title = (
                     self._clean_null_bytes(chat["title"])
                     if "title" in chat
@@ -432,20 +600,15 @@ class ChatTable:
         if chat is None:
             return None
 
-        # Sanitize message content for null characters before upserting
-        if isinstance(message.get("content"), str):
-            message["content"] = sanitize_text_for_db(message["content"])
-
+        user_id = chat.user_id
         chat = chat.chat
         history = chat.get("history", {})
+        messages = history.setdefault("messages", {})
+        existing_message = messages.get(message_id, {})
 
-        if message_id in history.get("messages", {}):
-            history["messages"][message_id] = {
-                **history["messages"][message_id],
-                **message,
-            }
-        else:
-            history["messages"][message_id] = message
+        history["messages"][message_id] = self._normalize_message_payload(
+            message_id, message, existing=existing_message
+        )
 
         history["currentId"] = message_id
 
@@ -1013,29 +1176,23 @@ class ChatTable:
 
                 # Check if there are any tags to filter, it should have all the tags
                 if "none" in tag_ids:
-                    query = query.filter(
-                        text(
-                            """
+                    query = query.filter(text("""
                             NOT EXISTS (
                                 SELECT 1
                                 FROM json_each(Chat.meta, '$.tags') AS tag
                             )
-                            """
-                        )
-                    )
+                            """))
                 elif tag_ids:
                     query = query.filter(
                         and_(
                             *[
-                                text(
-                                    f"""
+                                text(f"""
                                     EXISTS (
                                         SELECT 1
                                         FROM json_each(Chat.meta, '$.tags') AS tag
                                         WHERE tag.value = :tag_id_{tag_idx}
                                     )
-                                    """
-                                ).params(**{f"tag_id_{tag_idx}": tag_id})
+                                    """).params(**{f"tag_id_{tag_idx}": tag_id})
                                 for tag_idx, tag_id in enumerate(tag_ids)
                             ]
                         )
@@ -1071,29 +1228,23 @@ class ChatTable:
 
                 # Check if there are any tags to filter, it should have all the tags
                 if "none" in tag_ids:
-                    query = query.filter(
-                        text(
-                            """
+                    query = query.filter(text("""
                             NOT EXISTS (
                                 SELECT 1
                                 FROM json_array_elements_text(Chat.meta->'tags') AS tag
                             )
-                            """
-                        )
-                    )
+                            """))
                 elif tag_ids:
                     query = query.filter(
                         and_(
                             *[
-                                text(
-                                    f"""
+                                text(f"""
                                     EXISTS (
                                         SELECT 1
                                         FROM json_array_elements_text(Chat.meta->'tags') AS tag
                                         WHERE tag = :tag_id_{tag_idx}
                                     )
-                                    """
-                                ).params(**{f"tag_id_{tag_idx}": tag_id})
+                                    """).params(**{f"tag_id_{tag_idx}": tag_id})
                                 for tag_idx, tag_id in enumerate(tag_ids)
                             ]
                         )

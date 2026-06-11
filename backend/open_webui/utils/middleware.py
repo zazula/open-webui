@@ -127,7 +127,6 @@ from open_webui.env import (
 )
 from open_webui.constants import TASKS
 
-
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
@@ -284,6 +283,621 @@ def get_citation_source_from_tool_result(
                 "metadata": [{"source": tool_name}],
             }
         ]
+
+
+def split_content_and_whitespace(content):
+    content_stripped = content.rstrip()
+    original_whitespace = (
+        content[len(content_stripped) :] if len(content) > len(content_stripped) else ""
+    )
+    return content_stripped, original_whitespace
+
+
+def is_opening_code_block(content):
+    backtick_segments = content.split("```")
+    # Even number of segments means the last backticks are opening a new block
+    return len(backtick_segments) > 1 and len(backtick_segments) % 2 == 0
+
+
+_OPENAI_TOOL_DISPLAY_NAMES = {
+    "web_search_call": "Web Search",
+    "file_search_call": "File Search",
+    "computer_call": "Computer Use",
+}
+
+
+def _render_openai_tool_call_handler(item: dict, done: bool) -> str:
+    """Render an OpenAI Responses API server-side tool item as a <details> block.
+
+    Handles web_search_call, file_search_call, and computer_call items whose
+    schemas are defined in the openai-python SDK (generated from OpenAPI spec).
+    """
+    item_type = item.get("type", "")
+    call_id = item.get("id", "")
+    display_name = _OPENAI_TOOL_DISPLAY_NAMES.get(item_type, item_type)
+
+    # Build a short summary of what the tool did
+    summary = ""
+    if item_type == "web_search_call":
+        action = item.get("action", {})
+        if isinstance(action, dict):
+            atype = action.get("type", "")
+            if atype == "search":
+                queries = action.get("queries") or []
+                query = action.get("query", "")
+                summary = (
+                    f'Search: {", ".join(str(q) for q in queries)}'
+                    if queries
+                    else (f"Search: {query}" if query else "")
+                )
+            elif atype == "open_page":
+                summary = (
+                    f'Open page: {action.get("url", "")}' if action.get("url") else ""
+                )
+            elif atype == "find_in_page":
+                summary = (
+                    f'Find in page: {action.get("pattern", "")}'
+                    if action.get("pattern")
+                    else ""
+                )
+    elif item_type == "file_search_call":
+        queries = item.get("queries", [])
+        if queries:
+            summary = f'Queries: {", ".join(str(q) for q in queries)}'
+    elif item_type == "computer_call":
+        action = item.get("action")
+        actions = item.get("actions")
+        if isinstance(action, dict):
+            summary = f'Action: {action.get("type", "unknown")}'
+        elif isinstance(actions, list) and actions:
+            summary = f'Actions: {", ".join(a.get("type", "?") for a in actions if isinstance(a, dict))}'
+
+    escaped_name = html.escape(display_name)
+    if done:
+        return f'<details type="tool_calls" done="true" id="{call_id}" name="{escaped_name}" arguments="">\n<summary>Tool Executed</summary>\n{html.escape(summary)}\n</details>\n'
+    return f'<details type="tool_calls" done="false" id="{call_id}" name="{escaped_name}" arguments="">\n<summary>Executing...</summary>\n</details>\n'
+
+
+def serialize_output(output: list) -> str:
+    """
+    Convert OR-aligned output items to HTML for display.
+    For LLM consumption, use convert_output_to_messages() instead.
+    """
+    parts: list[str] = []
+
+    # First pass: collect function_call_output items by call_id for lookup
+    tool_outputs = {}
+    for item in output:
+        if item.get("type") == "function_call_output":
+            tool_outputs[item.get("call_id")] = item
+
+    # Second pass: render items in order
+    for idx, item in enumerate(output):
+        item_type = item.get("type", "")
+
+        if item_type == "message":
+            for content_part in item.get("content", []):
+                if "text" in content_part:
+                    text = content_part.get("text", "").strip()
+                    if text:
+                        parts.append(text)
+
+        elif item_type == "function_call":
+            call_id = item.get("call_id", "")
+            name = item.get("name", "")
+            arguments = item.get("arguments", "")
+
+            result_item = tool_outputs.get(call_id)
+            if result_item:
+                result_parts: list[str] = []
+                for result_output in result_item.get("output", []):
+                    if "text" in result_output:
+                        output_text = result_output.get("text", "")
+                        result_parts.append(
+                            str(output_text)
+                            if not isinstance(output_text, str)
+                            else output_text
+                        )
+                result_text = "".join(result_parts)
+                files = result_item.get("files")
+                embeds = result_item.get("embeds", "")
+
+                parts.append(
+                    f'<details type="tool_calls" done="true" id="{call_id}" name="{name}" arguments="{html.escape(json.dumps(arguments))}" files="{html.escape(json.dumps(files)) if files else ""}" embeds="{html.escape(json.dumps(embeds))}">\n<summary>Tool Executed</summary>\n{html.escape(json.dumps(result_text, ensure_ascii=False))}\n</details>'
+                )
+            else:
+                parts.append(
+                    f'<details type="tool_calls" done="false" id="{call_id}" name="{name}" arguments="{html.escape(json.dumps(arguments))}">\n<summary>Executing...</summary>\n</details>'
+                )
+
+        elif item_type == "function_call_output":
+            # Already handled inline with function_call above
+            pass
+
+        elif item_type in _OPENAI_TOOL_DISPLAY_NAMES:
+            status = item.get("status", "in_progress")
+            done = (
+                status in ("completed", "failed", "incomplete")
+                or idx != len(output) - 1
+            )
+            parts.append(_render_openai_tool_call_handler(item, done).rstrip("\n"))
+
+        elif item_type == "reasoning":
+            reasoning_parts: list[str] = []
+            # Check for 'summary' (new structure) or 'content' (legacy/fallback)
+            source_list = item.get("summary", []) or item.get("content", [])
+            for content_part in source_list:
+                if "text" in content_part:
+                    reasoning_parts.append(content_part.get("text", ""))
+                elif "summary" in content_part:  # Handle potential nested logic if any
+                    pass
+
+            reasoning_content = "".join(reasoning_parts).strip()
+
+            duration = item.get("duration")
+            status = item.get("status", "in_progress")
+
+            # Infer completion: if this reasoning item is NOT the last item,
+            # render as done (a subsequent item means reasoning is complete)
+            is_last_item = idx == len(output) - 1
+
+            display = html.escape(
+                "\n".join(
+                    (f"> {line}" if not line.startswith(">") else line)
+                    for line in reasoning_content.splitlines()
+                )
+            )
+
+            if status == "completed" or duration is not None or not is_last_item:
+                parts.append(
+                    f'<details type="reasoning" done="true" duration="{duration or 0}">\n<summary>Thought for {duration or 0} seconds</summary>\n{display}\n</details>'
+                )
+            else:
+                parts.append(
+                    f'<details type="reasoning" done="false">\n<summary>Thinking…</summary>\n{display}\n</details>'
+                )
+
+        elif item_type == "open_webui:code_interpreter":
+            # Code interpreter needs to inspect/mutate prior accumulated content
+            # to strip trailing unclosed code fences — materialize only here.
+            content = "\n".join(parts)
+            content_stripped, original_whitespace = split_content_and_whitespace(
+                content
+            )
+            if is_opening_code_block(content_stripped):
+                content = content_stripped.rstrip("`").rstrip() + original_whitespace
+            else:
+                content = content_stripped + original_whitespace
+
+            # Re-split back into parts list after mutation
+            parts = [content] if content else []
+
+            # Render the code_interpreter item as a <details> block
+            # so the frontend Collapsible renders "Analyzing..."/"Analyzed".
+            code = item.get("code", "").strip()
+            lang = item.get("lang", "python")
+            status = item.get("status", "in_progress")
+            duration = item.get("duration")
+            is_last_item = idx == len(output) - 1
+
+            # Build inner content: code block
+            display = ""
+            if code:
+                display = f"```{lang}\n{code}\n```"
+
+            # Build output attribute as HTML-escaped JSON for CodeBlock.svelte
+            ci_output = item.get("output")
+            output_attr = ""
+            if ci_output:
+                if isinstance(ci_output, dict):
+                    output_json = json.dumps(ci_output, ensure_ascii=False)
+                else:
+                    output_json = json.dumps(
+                        {"result": str(ci_output)}, ensure_ascii=False
+                    )
+                output_attr = f' output="{html.escape(output_json)}"'
+
+            if status == "completed" or duration is not None or not is_last_item:
+                parts.append(
+                    f'<details type="code_interpreter" done="true" duration="{duration or 0}"{output_attr}>\n<summary>Analyzed</summary>\n{display}\n</details>'
+                )
+            else:
+                parts.append(
+                    f'<details type="code_interpreter" done="false"{output_attr}>\n<summary>Analyzing…</summary>\n{display}\n</details>'
+                )
+
+    return "\n".join(parts).strip()
+
+
+def deep_merge(target, source):
+    """
+    Merge source into target recursively (returning new structure).
+    - Dicts: Recursive merge.
+    - Strings: Concatenation.
+    - Others: Overwrite.
+    """
+    if isinstance(target, dict) and isinstance(source, dict):
+        new_target = target.copy()
+        for k, v in source.items():
+            if k in new_target:
+                new_target[k] = deep_merge(new_target[k], v)
+            else:
+                new_target[k] = v
+        return new_target
+    elif isinstance(target, str) and isinstance(source, str):
+        return target + source
+    else:
+        return source
+
+
+def handle_responses_streaming_event(
+    data: dict,
+    current_output: list,
+) -> tuple[list, dict | None]:
+    """
+    Handle Responses API streaming events in a pure functional way.
+
+    Args:
+        data: The event data
+        current_output: List of output items (treated as immutable)
+
+    Returns:
+        tuple[list, dict | None]: (new_output, metadata)
+        - new_output: The updated output list.
+        - metadata: Metadata to emit (e.g. usage), {} if update occurred, None if skip.
+    """
+    # Default: no change
+    # Note: treating current_output as immutable, but avoiding full deepcopy for perf.
+    # We will shallow copy only if we need to modify the list structure or items.
+
+    event_type = data.get("type", "")
+
+    if event_type == "response.output_item.added":
+        item = data.get("item", {})
+        if item:
+            new_output = list(current_output)
+            new_output.append(item)
+            return new_output, None
+        return current_output, None
+
+    elif event_type == "response.content_part.added":
+        part = data.get("part", {})
+        output_index = data.get("output_index", len(current_output) - 1)
+
+        if current_output and 0 <= output_index < len(current_output):
+            new_output = list(current_output)
+            # Copy the item to mutate it
+            item = new_output[output_index].copy()
+            new_output[output_index] = item
+
+            if "content" not in item:
+                item["content"] = []
+            else:
+                # Copy content list
+                item["content"] = list(item["content"])
+
+            if item.get("type") == "reasoning":
+                # Reasoning items should not have content parts
+                pass
+            else:
+                item["content"].append(part)
+            return new_output, None
+        return current_output, None
+
+    elif event_type == "response.reasoning_summary_part.added":
+        part = data.get("part", {})
+        output_index = data.get("output_index", len(current_output) - 1)
+
+        if current_output and 0 <= output_index < len(current_output):
+            new_output = list(current_output)
+            item = new_output[output_index].copy()
+            new_output[output_index] = item
+
+            if "summary" not in item:
+                item["summary"] = []
+            else:
+                item["summary"] = list(item["summary"])
+
+            item["summary"].append(part)
+            return new_output, None
+        return current_output, None
+
+    elif event_type.startswith("response.") and event_type.endswith(".delta"):
+        # Generic Delta Handling
+        parts = event_type.split(".")
+        if len(parts) >= 3:
+            delta_type = parts[1]
+            delta = data.get("delta", "")
+
+            output_index = data.get("output_index", len(current_output) - 1)
+
+            if current_output and 0 <= output_index < len(current_output):
+                new_output = list(current_output)
+                item = new_output[output_index].copy()
+                new_output[output_index] = item
+                item_type = item.get("type", "")
+
+                # Determine target field and object based on delta_type and item_type
+                if delta_type == "function_call_arguments":
+                    key = "arguments"
+                    if item_type == "function_call":
+                        # Function call args are usually strings
+                        item[key] = item.get(key, "") + str(delta)
+                else:
+                    # Generic handling, refined by item type below
+                    pass
+
+                    if item_type == "message":
+                        # Message items: "text"/"output_text" -> "text"
+                        # "reasoning_text" -> Skipped (should use reasoning item)
+                        if delta_type in ["text", "output_text"]:
+                            key = "text"
+                        elif delta_type in ["reasoning_text", "reasoning_summary_text"]:
+                            # Skip reasoning updates for message items
+                            return new_output, None
+                        else:
+                            key = delta_type
+
+                        content_index = data.get("content_index", 0)
+                        if "content" not in item:
+                            item["content"] = []
+                        else:
+                            item["content"] = list(item["content"])
+                        content_list = item["content"]
+
+                        while len(content_list) <= content_index:
+                            content_list.append({"type": "text", "text": ""})
+
+                        # Copy the part to mutate it
+                        part = content_list[content_index].copy()
+                        content_list[content_index] = part
+
+                        current_val = part.get(key)
+                        if current_val is None:
+                            # Initialize based on delta type
+                            current_val = {} if isinstance(delta, dict) else ""
+
+                        part[key] = deep_merge(current_val, delta)
+
+                    elif item_type == "reasoning":
+                        # Reasoning items: "reasoning_text"/"reasoning_summary_text" -> "text"
+                        # "text"/"output_text" -> Skipped (should use message item)
+                        if delta_type == "reasoning_summary_text":
+                            # Summary updates -> item['summary']
+                            key = "text"
+                            summary_index = data.get("summary_index", 0)
+                            if "summary" not in item:
+                                item["summary"] = []
+                            else:
+                                item["summary"] = list(item["summary"])
+                            summary_list = item["summary"]
+
+                            while len(summary_list) <= summary_index:
+                                summary_list.append(
+                                    {"type": "summary_text", "text": ""}
+                                )
+
+                            part = summary_list[summary_index].copy()
+                            summary_list[summary_index] = part
+
+                            target_val = part.get(key, "")
+                            part[key] = deep_merge(target_val, delta)
+
+                        elif delta_type == "reasoning_text":
+                            # Reasoning body updates -> item['content']
+                            key = "text"
+                            content_index = data.get("content_index", 0)
+                            if "content" not in item:
+                                item["content"] = []
+                            else:
+                                item["content"] = list(item["content"])
+                            content_list = item["content"]
+
+                            while len(content_list) <= content_index:
+                                # Reasoning content parts default to text
+                                content_list.append({"type": "text", "text": ""})
+
+                            part = content_list[content_index].copy()
+                            content_list[content_index] = part
+
+                            target_val = part.get(key, "")
+                            part[key] = deep_merge(target_val, delta)
+
+                        elif delta_type in ["text", "output_text"]:
+                            return new_output, None
+                        else:
+                            # Fallback just in case other deltas target reasoning?
+                            pass
+
+                    else:
+                        # Fallback for other item types
+                        if delta_type in ["text", "output_text"]:
+                            key = "text"
+                        else:
+                            key = delta_type
+
+                        current_val = item.get(key)
+                        if current_val is None:
+                            current_val = {} if isinstance(delta, dict) else ""
+                        item[key] = deep_merge(current_val, delta)
+
+            return new_output, None
+
+    elif event_type.startswith("response.") and event_type.endswith(".done"):
+        # Delta Events: response.content_part.done, response.text.done, etc.
+        parts = event_type.split(".")
+        if len(parts) >= 3:
+            type_name = parts[1]
+
+            # 1. Handle specific Delta "done" signals
+            if type_name == "content_part":
+                # "Signaling that no further changes will occur to a content part"
+                # If payloads contains the full part, we could update it.
+                # Usually purely signaling in standard implementation, but we check payload.
+                part = data.get("part")
+                output_index = data.get("output_index", len(current_output) - 1)
+
+                if part and current_output and 0 <= output_index < len(current_output):
+                    new_output = list(current_output)
+                    item = new_output[output_index].copy()
+                    new_output[output_index] = item
+
+                    if "content" in item:
+                        item["content"] = list(item["content"])
+                        content_index = data.get(
+                            "content_index", len(item["content"]) - 1
+                        )
+                        if 0 <= content_index < len(item["content"]):
+                            item["content"][content_index] = part
+                            return new_output, {}
+                return current_output, None
+
+            elif type_name == "reasoning_summary_part":
+                part = data.get("part")
+                output_index = data.get("output_index", len(current_output) - 1)
+
+                if part and current_output and 0 <= output_index < len(current_output):
+                    new_output = list(current_output)
+                    item = new_output[output_index].copy()
+                    new_output[output_index] = item
+
+                    if "summary" in item:
+                        item["summary"] = list(item["summary"])
+                        summary_index = data.get(
+                            "summary_index", len(item["summary"]) - 1
+                        )
+                        if 0 <= summary_index < len(item["summary"]):
+                            item["summary"][summary_index] = part
+                            return new_output, {}
+                return current_output, None
+
+            # 2. Skip Output Item done (handled specifically below)
+            if type_name == "output_item":
+                pass
+
+            # 3. Generic Field Done (text.done, audio.done)
+            elif type_name not in ["completed", "failed"]:
+                output_index = data.get("output_index", len(current_output) - 1)
+                if current_output and 0 <= output_index < len(current_output):
+                    key = (
+                        "text"
+                        if type_name
+                        in [
+                            "text",
+                            "output_text",
+                            "reasoning_text",
+                            "reasoning_summary_text",
+                        ]
+                        else type_name
+                    )
+                    if type_name == "function_call_arguments":
+                        key = "arguments"
+
+                    if key in data:
+                        final_value = data[key]
+                        new_output = list(current_output)
+                        item = new_output[output_index].copy()
+                        new_output[output_index] = item
+                        item_type = item.get("type", "")
+
+                        if type_name == "function_call_arguments":
+                            if item_type == "function_call":
+                                item["arguments"] = final_value
+                        elif item_type == "message":
+                            content_index = data.get("content_index", 0)
+                            if "content" in item:
+                                item["content"] = list(item["content"])
+                                if len(item["content"]) > content_index:
+                                    part = item["content"][content_index].copy()
+                                    item["content"][content_index] = part
+                                    part[key] = final_value
+                        elif item_type == "reasoning":
+                            item["status"] = "completed"
+                        else:
+                            item[key] = final_value
+
+                        return new_output, {}
+
+        return current_output, None
+
+    elif event_type == "response.output_item.done":
+        # Delta Event: Output item complete
+        item = data.get("item")
+        output_index = data.get("output_index", len(current_output) - 1)
+
+        new_output = list(current_output)
+        if item and 0 <= output_index < len(current_output):
+            new_output[output_index] = item
+        elif item:
+            new_output.append(item)
+        return new_output, {}
+
+    elif event_type == "response.completed":
+        # State Machine Event: Completed
+        response_data = data.get("response", {})
+        final_output = response_data.get("output")
+
+        new_output = final_output if final_output is not None else current_output
+
+        # Final completed responses should not retain in-progress output items.
+        if new_output:
+            for item in new_output:
+                if item.get("status") == "in_progress":
+                    item["status"] = "completed"
+                if (
+                    item.get("type") == "reasoning"
+                    and item.get("status") != "completed"
+                ):
+                    item["status"] = "completed"
+
+        return new_output, {
+            "usage": response_data.get("usage"),
+            "done": True,
+            "response_id": response_data.get("id"),
+        }
+
+    elif event_type == "response.in_progress":
+        # State Machine Event: In Progress
+        # We could extract metadata if needed, but for now just acknowledge iteration
+        return current_output, None
+
+    elif event_type == "response.failed":
+        # State Machine Event: Failed
+        error = data.get("response", {}).get("error", {})
+        return current_output, {"error": error}
+
+    else:
+        return current_output, None
+
+
+def get_source_context(
+    sources: list, source_ids: dict = None, include_content: bool = True
+) -> str:
+    """
+    Build <source> tag context string from citation sources.
+    """
+    context_string = ""
+    if source_ids is None:
+        source_ids = {}
+    for source in sources:
+        for doc, meta in zip(source.get("document", []), source.get("metadata", [])):
+            source_id = (
+                meta.get("source") or source.get("source", {}).get("id") or "N/A"
+            )
+            if source_id not in source_ids:
+                source_ids[source_id] = len(source_ids) + 1
+            src_name = source.get("source", {}).get("name")
+            src_type = source.get("source", {}).get("type")
+            src_rid = source.get("source", {}).get("id")
+            body = doc if include_content else ""
+            context_string += (
+                f'<source id="{source_ids[source_id]}"'
+                + (f' name="{src_name}"' if src_name else "")
+                + (f' resource-type="{src_type}"' if src_type else "")
+                + (f' resource-id="{src_rid}"' if src_rid else "")
+                + f">{body}</source>\n"
+            )
+    return context_string
 
 
 def apply_source_context_to_messages(
@@ -1399,6 +2013,206 @@ async def convert_url_images_to_base64(form_data):
     return form_data
 
 
+async def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]:
+    """
+    Load the message chain from DB up to message_id,
+    keeping only LLM-relevant fields (role, content, output).
+    """
+    messages_map = await Chats.get_messages_map_by_chat_id(chat_id)
+    if not messages_map:
+        return None
+
+    db_messages = get_message_list(messages_map, message_id)
+    if not db_messages:
+        return None
+
+    return [
+        {k: v for k, v in msg.items() if k in ("role", "content", "output", "files")}
+        for msg in db_messages
+    ]
+
+
+def get_reasoning_replay_format(model_id: str | None, model: dict | None = None) -> str:
+    normalized_model_id = (model_id or "").lower()
+    model = model if isinstance(model, dict) else {}
+    owned_by = (model.get("owned_by") or "").lower()
+    upstream_owned_by = (model.get("openai", {}).get("owned_by") or "").lower()
+
+    if owned_by == "ollama":
+        return "thinking"
+
+    if (
+        normalized_model_id.startswith("z.ai.glm")
+        or normalized_model_id.startswith("glm-")
+        or ".glm-" in normalized_model_id
+        or upstream_owned_by == "z-ai"
+    ):
+        return "field"
+
+    if "minimax" in normalized_model_id:
+        return "tags"
+
+    return "tags"
+
+
+def is_minimax_model(model_id: str | None, model: dict | None = None) -> bool:
+    normalized_model_id = (model_id or "").lower()
+    model = model if isinstance(model, dict) else {}
+    upstream_model_id = (model.get("openai", {}).get("id") or "").lower()
+    upstream_root = (model.get("openai", {}).get("root") or "").lower()
+
+    return any(
+        "minimax" in value
+        for value in (normalized_model_id, upstream_model_id, upstream_root)
+    )
+
+
+def ensure_minimax_tool_continuation_budget(
+    form_data: dict, model_id: str | None, model: dict | None = None
+) -> dict:
+    if not is_minimax_model(model_id, model):
+        return form_data
+
+    # MiniMax M2 interleaved thinking often spends the first dozens of tokens
+    # after a tool result on reasoning.  Small continuation budgets can end
+    # before any visible content is emitted, which looks like the model stopped
+    # at the tool result.
+    min_budget = 256
+    for key in ("max_tokens", "max_completion_tokens"):
+        value = form_data.get(key)
+        if isinstance(value, int) and value > 0:
+            form_data[key] = max(value, min_budget)
+
+    return form_data
+
+
+def normalize_tool_result_content_for_llm(tool_function_name: str, tool_result) -> str:
+    tool_name = tool_function_name or "tool"
+
+    if tool_result is None:
+        return json.dumps(
+            {
+                "status": "empty",
+                "tool": tool_name,
+                "message": f"{tool_name} returned no content. Treat this as an empty result and continue without retrying the identical tool call.",
+            },
+            ensure_ascii=False,
+        )
+
+    content = str(tool_result)
+    if not content.strip():
+        return json.dumps(
+            {
+                "status": "empty",
+                "tool": tool_name,
+                "message": f"{tool_name} returned an empty response. Treat this as an empty result and continue without retrying the identical tool call.",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict) and "error" in parsed and "status" not in parsed:
+        return json.dumps(
+            {
+                "status": "error",
+                "tool": tool_name,
+                "message": parsed.get("error"),
+                "raw": parsed,
+                "instruction": "Do not retry the identical tool call unless changing parameters is likely to fix the error. Continue by explaining the limitation or using available context.",
+            },
+            ensure_ascii=False,
+        )
+
+    if content.lower().startswith(("error:", "http error")):
+        return json.dumps(
+            {
+                "status": "error",
+                "tool": tool_name,
+                "message": content,
+                "instruction": "Do not retry the identical tool call unless changing parameters is likely to fix the error. Continue by explaining the limitation or using available context.",
+            },
+            ensure_ascii=False,
+        )
+
+    return content
+
+
+def process_messages_with_output(
+    messages: list[dict],
+    reasoning_format: str = "tags",
+) -> list[dict]:
+    """
+    Process messages with OR-aligned output items for LLM consumption.
+
+    For assistant messages with 'output' field, produces properly formatted
+    OpenAI-style messages (tool_calls + tool results). Strips 'output' before LLM.
+    """
+    processed = []
+
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("output"):
+            # Use output items for clean OpenAI-format messages
+            output_messages = convert_output_to_messages(
+                message["output"],
+                raw=True,
+                reasoning_format=reasoning_format,
+            )
+            if output_messages:
+                processed.extend(output_messages)
+                continue
+
+        # Strip 'output' field before adding (LLM shouldn't see it)
+        clean_message = {k: v for k, v in message.items() if k != "output"}
+        processed.append(clean_message)
+
+    return processed
+
+
+SKILL_MENTION_RE = re.compile(r"<\$([^|>]+)\|?[^>]*>")
+
+
+def _get_text_parts(message: dict) -> list[str]:
+    """Return all text segments from a message's content."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [
+            p.get("text", "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+    return []
+
+
+def extract_skill_ids_from_messages(messages: list[dict]) -> set[str]:
+    """Extract skill IDs from <$skillId|label> mention tags in messages."""
+    ids: set[str] = set()
+    for message in messages:
+        for text in _get_text_parts(message):
+            ids.update(m.group(1) for m in SKILL_MENTION_RE.finditer(text))
+    return ids
+
+
+def strip_skill_mentions(messages: list[dict]) -> None:
+    """Strip <$skillId|label> mention tags from message content in-place."""
+    strip_re = re.compile(r"<\$[^>]+>")
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and strip_re.search(content):
+            message["content"] = strip_re.sub("", content).strip()
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text", "")
+                    if strip_re.search(text):
+                        part["text"] = strip_re.sub("", text).strip()
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
@@ -1406,6 +2220,51 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
+
+    # Load messages from DB when available — DB preserves structured 'output' items
+    # which the frontend strips, causing tool calls to be merged into content.
+    chat_id = metadata.get("chat_id")
+    user_message_id = metadata.get("user_message_id")
+
+    if chat_id and user_message_id and not chat_id.startswith("local:"):
+        db_messages = await load_messages_from_db(chat_id, user_message_id)
+        if db_messages:
+            system_message = get_system_message(form_data.get("messages", []))
+            form_data["messages"] = (
+                [system_message, *db_messages] if system_message else db_messages
+            )
+
+            # Inject image files into content as image_url parts (mirrors frontend logic)
+            for message in form_data["messages"]:
+                image_files = [
+                    f
+                    for f in message.get("files", [])
+                    if f.get("type") == "image"
+                    or (f.get("content_type") or "").startswith("image/")
+                ]
+                if message.get("role") == "user" and image_files:
+                    text_content = message.get("content", "")
+                    if isinstance(text_content, str):
+                        message["content"] = [
+                            {"type": "text", "text": text_content},
+                            *[
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f["url"]},
+                                }
+                                for f in image_files
+                                if f.get("url")
+                            ],
+                        ]
+                # Strip files field — it's been incorporated into content
+                message.pop("files", None)
+
+    # Process messages with OR-aligned output items for clean LLM messages
+    reasoning_replay_format = get_reasoning_replay_format(form_data.get("model"), model)
+    form_data["messages"] = process_messages_with_output(
+        form_data.get("messages", []),
+        reasoning_format=reasoning_replay_format,
+    )
 
     system_message = get_system_message(form_data.get("messages", []))
     if system_message:  # Chat Controls/User Settings
@@ -3361,7 +4220,10 @@ async def process_chat_response(
                         results.append(
                             {
                                 "tool_call_id": tool_call_id,
-                                "content": tool_result or "",
+                                "content": normalize_tool_result_content_for_llm(
+                                    tool_function_name,
+                                    tool_result,
+                                ),
                                 **(
                                     {"files": tool_result_files}
                                     if tool_result_files
@@ -3420,6 +4282,72 @@ async def process_chat_response(
                                 ),
                             ],
                         }
+                        new_form_data = ensure_minimax_tool_continuation_budget(
+                            new_form_data,
+                            model_id,
+                            model,
+                        )
+
+                        if ENABLE_RESPONSES_API_STATEFUL and last_response_id:
+                            system_message = get_system_message(form_data["messages"])
+                            new_form_data["messages"] = (
+                                [system_message] if system_message else []
+                            ) + convert_output_to_messages(
+                                output,
+                                raw=True,
+                                reasoning_format=get_reasoning_replay_format(
+                                    model_id, model
+                                ),
+                            )
+                            new_form_data["previous_response_id"] = last_response_id
+                        else:
+                            tool_messages = convert_output_to_messages(
+                                output,
+                                raw=True,
+                                reasoning_format=get_reasoning_replay_format(
+                                    model_id, model
+                                ),
+                            )
+
+                            # Chat Completions providers don't support multimodal
+                            # tool messages.  Extract images into a user message.
+                            image_urls = []
+                            for message in tool_messages:
+                                if message.get("role") == "tool" and isinstance(
+                                    message.get("content"), list
+                                ):
+                                    text_parts = []
+                                    for part in message["content"]:
+                                        if part.get("type") == "input_text":
+                                            text_parts.append(part.get("text", ""))
+                                        elif part.get("type") == "input_image":
+                                            image_urls.append(part.get("image_url", ""))
+                                    message["content"] = "".join(text_parts)
+
+                            new_form_data["messages"] = [
+                                *form_data["messages"],
+                                *tool_messages,
+                            ]
+
+                            if image_urls:
+                                new_form_data["messages"].append(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "Here are the images from the tool results above. Please analyze them.",
+                                            },
+                                            *[
+                                                {
+                                                    "type": "image_url",
+                                                    "image_url": {"url": url},
+                                                }
+                                                for url in image_urls
+                                            ],
+                                        ],
+                                    }
+                                )
 
                         res = await generate_chat_completion(
                             request,
@@ -3462,8 +4390,7 @@ async def process_chat_response(
                             if content_blocks[-1]["attributes"].get("type") == "code":
                                 code = content_blocks[-1]["content"]
                                 if CODE_INTERPRETER_BLOCKED_MODULES:
-                                    blocking_code = textwrap.dedent(
-                                        f"""
+                                    blocking_code = textwrap.dedent(f"""
                                         import builtins
 
                                         BLOCKED_MODULES = {CODE_INTERPRETER_BLOCKED_MODULES}
@@ -3479,8 +4406,7 @@ async def process_chat_response(
                                             return _real_import(name, globals, locals, fromlist, level)
 
                                         builtins.__import__ = restricted_import
-                                    """
-                                    )
+                                    """)
                                     code = blocking_code + "\n" + code
 
                                 if (
@@ -3590,16 +4516,23 @@ async def process_chat_response(
                                 **form_data,
                                 "model": model_id,
                                 "stream": True,
+                                "metadata": metadata,
                                 "messages": [
                                     *form_data["messages"],
-                                    {
-                                        "role": "assistant",
-                                        "content": serialize_content_blocks(
-                                            content_blocks, raw=True
+                                    *convert_output_to_messages(
+                                        output,
+                                        raw=True,
+                                        reasoning_format=get_reasoning_replay_format(
+                                            model_id, model
                                         ),
-                                    },
+                                    ),
                                 ],
                             }
+                            new_form_data = ensure_minimax_tool_continuation_budget(
+                                new_form_data,
+                                model_id,
+                                model,
+                            )
 
                             res = await generate_chat_completion(
                                 request,

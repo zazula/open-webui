@@ -1439,6 +1439,44 @@ async def query_knowledge_files(
     if not __user__:
         return json.dumps({"error": "User context not available"})
 
+    # Coerce parameters from LLM tool calls (may come as strings)
+    if isinstance(count, str):
+        try:
+            count = int(count)
+        except ValueError:
+            count = 5  # Default fallback
+
+    def _flatten_knowledge_ids(value) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.lower() in ("none", "null", ""):
+                return []
+
+            if stripped.startswith("[") or stripped.startswith("{"):
+                try:
+                    return _flatten_knowledge_ids(json.loads(stripped))
+                except json.JSONDecodeError:
+                    pass
+
+            return [stripped]
+
+        if isinstance(value, (list, tuple, set)):
+            items = []
+            for item in value:
+                items.extend(_flatten_knowledge_ids(item))
+            return items
+
+        return [str(value).strip()]
+
+    normalized_knowledge_ids = []
+    for knowledge_id in _flatten_knowledge_ids(knowledge_ids):
+        if knowledge_id and knowledge_id not in normalized_knowledge_ids:
+            normalized_knowledge_ids.append(knowledge_id)
+    knowledge_ids = normalized_knowledge_ids or None
+
     try:
         from open_webui.models.knowledge import Knowledges
         from open_webui.models.files import Files

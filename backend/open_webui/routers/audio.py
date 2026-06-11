@@ -57,7 +57,6 @@ from open_webui.env import (
     ENABLE_FORWARD_USER_INFO_HEADERS,
 )
 
-
 router = APIRouter()
 
 # Constants
@@ -366,6 +365,26 @@ async def speech(request: Request, user=Depends(get_verified_user)):
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # claude-fix:strip-media-and-data-uris-server-side - guard against inline base64 audio loops from prior tts_auto_speak output
+    if isinstance(payload, dict) and isinstance(payload.get("input"), str):
+        import re as _re
+
+        _inp = payload["input"]
+        _inp = _re.sub(
+            r"<(audio|video|iframe)\b[^>]*>[\s\S]*?</\1>",
+            "",
+            _inp,
+            flags=_re.IGNORECASE,
+        )
+        _inp = _re.sub(
+            r"<(audio|video|iframe|source|track|img)\b[^>]*/?>",
+            "",
+            _inp,
+            flags=_re.IGNORECASE,
+        )
+        _inp = _re.sub(r'data:[^,\s"<>]+,[A-Za-z0-9+/=]{20,}', "", _inp)
+        payload["input"] = _inp
 
     r = None
     if request.app.state.config.TTS_ENGINE == "openai":

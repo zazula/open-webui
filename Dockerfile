@@ -156,6 +156,10 @@ RUN pip3 install --no-cache-dir uv && \
     mkdir -p /app/backend/data && chown -R $UID:$GID /app/backend/data/ && \
     rm -rf /var/lib/apt/lists/*;
 
+# install playwright
+RUN playwright install chromium && \
+    playwright install-deps chromium
+
 # Install Ollama if requested
 RUN if [ "$USE_OLLAMA" = "true" ]; then \
     date +%s > /tmp/ollama_build_hash && \

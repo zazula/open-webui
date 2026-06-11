@@ -44,6 +44,14 @@ def is_valid_model_id(model_id: str) -> bool:
     return model_id and len(model_id) <= 256
 
 
+def normalize_tag_name(tag) -> Optional[str]:
+    if isinstance(tag, str):
+        return tag
+    if isinstance(tag, dict):
+        return tag.get("name")
+    return None
+
+
 ###########################
 # GetModels
 ###########################
@@ -126,23 +134,17 @@ async def get_base_models(
 
 @router.get("/tags", response_model=list[str])
 async def get_model_tags(
-    user=Depends(get_verified_user), db: Session = Depends(get_session)
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
 ):
-    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
-        models = Models.get_models(db=db)
-    else:
-        models = Models.get_models_by_user_id(user.id, db=db)
-
-    tags_set = set()
-    for model in models:
-        if model.meta:
-            meta = model.meta.model_dump()
-            for tag in meta.get("tags", []):
-                tags_set.add((tag.get("name")))
-
-    tags = [tag for tag in tags_set]
-    tags.sort()
-    return tags
+    tags = await Models.get_all_tags(
+        user_id=user.id,
+        is_admin=(user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL),
+        db=db,
+    )
+    normalized_tags = {
+        tag_name for tag in tags if (tag_name := normalize_tag_name(tag))
+    }
+    return sorted(normalized_tags)
 
 
 ############################

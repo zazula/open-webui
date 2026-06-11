@@ -52,7 +52,8 @@ from open_webui.utils.misc import (
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access
 from open_webui.utils.headers import include_user_info_headers
-
+from open_webui.utils.anthropic import is_anthropic_url, get_anthropic_models
+from open_webui.socket.utils import RedisDict
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +117,70 @@ def openai_reasoning_model_handler(payload):
             payload["messages"][0]["role"] = "developer"
 
     return payload
+
+
+def _set_openai_models_cache(request: Request, models: dict):
+    if isinstance(request.app.state.OPENAI_MODELS, RedisDict):
+        request.app.state.OPENAI_MODELS.set(models)
+    else:
+        request.app.state.OPENAI_MODELS = models
+
+
+def _get_cached_openai_model_from_unified_state(request: Request, model_id: str):
+    unified_models = request.app.state.MODELS
+    if not unified_models:
+        return None
+
+    model = unified_models.get(model_id)
+    if model and model.get("owned_by") == "openai" and model.get("urlIdx") is not None:
+        return model
+
+    info = (model or {}).get("info", {}) or {}
+    base_model_id = info.get("base_model_id")
+    if not base_model_id:
+        return None
+
+    base_model = unified_models.get(base_model_id)
+    if (
+        base_model
+        and base_model.get("owned_by") == "openai"
+        and base_model.get("urlIdx") is not None
+    ):
+        return {
+            **base_model,
+            "id": model_id,
+            "name": (model or {}).get("name", model_id),
+            "info": info or base_model.get("info"),
+            "preset": (model or {}).get("preset", False),
+        }
+
+    return None
+
+
+async def resolve_openai_model(
+    request: Request, model_id: Optional[str], user: UserModel
+):
+    if not model_id:
+        return None
+
+    models = request.app.state.OPENAI_MODELS
+    model = models.get(model_id) if models else None
+    if model:
+        return model
+
+    model = _get_cached_openai_model_from_unified_state(request, model_id)
+    if model:
+        return model
+
+    response = await get_all_models(request, user=user)
+    refreshed_models = {
+        model["id"]: model for model in response.get("data", []) if model.get("id")
+    }
+    _set_openai_models_cache(request, refreshed_models)
+
+    return refreshed_models.get(
+        model_id
+    ) or _get_cached_openai_model_from_unified_state(request, model_id)
 
 
 async def get_headers_and_cookies(
@@ -452,7 +517,16 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
                 if connection_type:
                     model["connection_type"] = connection_type
 
-    log.debug(f"get_all_models:responses() {responses}")
+    response_counts = [
+        len(response.get("data", []))
+        for response in responses
+        if isinstance(response, dict)
+    ]
+    log.debug(
+        "get_all_models:responses() fetched %s response payload(s) with model counts=%s",
+        len(responses),
+        response_counts,
+    )
     return responses
 
 
@@ -763,8 +837,73 @@ def get_azure_allowed_params(api_version: str) -> set[str]:
     return allowed_params
 
 
-def is_openai_reasoning_model(model: str) -> bool:
-    return model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
+def is_openai_new_model(model: str) -> bool:
+    model_lower = model.lower()
+    # o-series models (o1, o3, o4, o5, ...)
+    if re.match(r"^o\d+", model_lower):
+        return True
+    # gpt-N where N >= 5 (gpt-5, gpt-5.2, gpt-6, ...)
+    m = re.match(r"^gpt-(\d+)", model_lower)
+    if m and int(m.group(1)) >= 5:
+        return True
+    return False
+
+
+def is_zai_glm_chat_completion(url: str, model: str) -> bool:
+    model_lower = (model or "").lower()
+    url_lower = (url or "").lower()
+    return "api.z.ai" in url_lower and model_lower.startswith("glm-")
+
+
+def payload_has_reasoning_content(messages: list[dict]) -> bool:
+    return any(
+        isinstance(message, dict) and bool(message.get("reasoning_content"))
+        for message in messages or []
+    )
+
+
+def apply_zai_glm_reasoning_and_tool_params(payload: dict) -> dict:
+    """Apply Z.AI GLM-specific knobs for preserved thinking and streamed tools.
+
+    Z.AI's API defaults to clearing historical reasoning. When Open WebUI
+    replays a tool-call turn with assistant.reasoning_content, set
+    thinking.clear_thinking=false so GLM preserves the reasoning chain in the
+    required top-level field instead of treating <think> tags as visible text.
+    """
+    messages = payload.get("messages") or []
+
+    if payload_has_reasoning_content(messages):
+        thinking = payload.get("thinking")
+        if not isinstance(thinking, dict):
+            thinking = {}
+
+        thinking.setdefault("type", "enabled")
+        thinking["clear_thinking"] = False
+        payload["thinking"] = thinking
+
+    if (
+        payload.get("stream")
+        and payload.get("tools")
+        and payload.get("tool_stream") is None
+    ):
+        payload["tool_stream"] = True
+
+    return payload
+
+
+def _sanitize_model_for_url(model: str) -> str:
+    """Sanitize a model name before interpolating it into a URL path.
+
+    Rejects path traversal attempts (../, /, \\) and percent-encodes
+    the name so it is safe to use as a single URL path segment
+    (e.g. Azure deployment name).
+    """
+    if not model or ".." in model or "/" in model or "\\" in model:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid model name: must not be empty or contain path separators or traversal sequences",
+        )
+    return quote(model, safe="")
 
 
 def convert_to_azure_payload(url, payload: dict, api_version: str):
@@ -834,27 +973,12 @@ async def generate_chat_completion(
             if not bypass_system_prompt:
                 payload = apply_system_prompt_to_body(system, payload, metadata, user)
 
-        # Check if user has access to the model
-        if not bypass_filter and user.role == "user":
-            if not (
-                user.id == model_info.user_id
-                or has_access(
-                    user.id,
-                    type="read",
-                    access_control=model_info.access_control,
-                    db=db,
-                )
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Model not found",
-                )
-    elif not bypass_filter:
-        if user.role != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail="Model not found",
-            )
+        await check_model_access(user, model_info, bypass_filter)
+    else:
+        await check_model_access(user, None, bypass_filter)
+
+    # Check if model is already in app state cache to avoid expensive get_all_models() call
+    model = await resolve_openai_model(request, model_id, user)
 
     await get_all_models(request, user=user)
     model = request.app.state.OPENAI_MODELS.get(model_id)
@@ -926,6 +1050,9 @@ async def generate_chat_completion(
         request_url = f"{request_url}/chat/completions?api-version={api_version}"
     else:
         request_url = f"{url}/chat/completions"
+
+    if not is_responses and is_zai_glm_chat_completion(url, payload.get("model", "")):
+        payload = apply_zai_glm_reasoning_and_tool_params(payload)
 
     payload = json.dumps(payload)
 
@@ -1001,11 +1128,11 @@ async def embeddings(request: Request, form_data: dict, user):
     # Prepare payload/body
     body = json.dumps(form_data)
     # Find correct backend url/key based on model
-    await get_all_models(request, user=user)
     model_id = form_data.get("model")
-    models = request.app.state.OPENAI_MODELS
-    if model_id in models:
-        idx = models[model_id]["urlIdx"]
+    # Check if model is already in app state cache to avoid expensive get_all_models() call
+    model = await resolve_openai_model(request, model_id, user)
+    if model:
+        idx = model["urlIdx"]
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
@@ -1067,6 +1194,133 @@ async def embeddings(request: Request, form_data: dict, user):
             await cleanup_response(r, session)
 
 
+class ResponsesForm(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    input: Optional[list | str] = None
+    instructions: Optional[str] = None
+    stream: Optional[bool] = None
+    temperature: Optional[float] = None
+    max_output_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    tools: Optional[list] = None
+    tool_choice: Optional[str | dict] = None
+    text: Optional[dict] = None
+    truncation: Optional[str] = None
+    metadata: Optional[dict] = None
+    store: Optional[bool] = None
+    reasoning: Optional[dict] = None
+    previous_response_id: Optional[str] = None
+
+
+@router.post("/responses")
+async def responses(
+    request: Request,
+    form_data: ResponsesForm,
+    user=Depends(get_verified_user),
+):
+    """
+    Forward requests to the OpenAI Responses API endpoint.
+    Routes to the correct upstream backend based on the model field.
+    """
+    payload = form_data.model_dump(exclude_none=True)
+
+    idx = 0
+    model_id = form_data.model
+
+    # Enforce per-model access control
+    await check_model_access(
+        user, await Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL
+    )
+
+    body = json.dumps(payload)
+
+    if model_id:
+        model = await resolve_openai_model(request, model_id, user)
+        if model:
+            idx = model["urlIdx"]
+
+    url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
+    key = request.app.state.config.OPENAI_API_KEYS[idx]
+    api_config = request.app.state.config.OPENAI_API_CONFIGS.get(
+        str(idx),
+        request.app.state.config.OPENAI_API_CONFIGS.get(url, {}),  # Legacy support
+    )
+
+    r = None
+    streaming = False
+
+    try:
+        headers, cookies = await get_headers_and_cookies(
+            request, url, key, api_config, user=user
+        )
+
+        if api_config.get("azure", False):
+            auth_type = api_config.get("auth_type", "bearer")
+            if auth_type not in ("azure_ad", "microsoft_entra_id"):
+                headers["api-key"] = key
+
+            is_azure_v1 = bool(re.search(r"/openai/v1(?:/|$)", url))
+
+            if is_azure_v1:
+                request_url = f'{url.rstrip("/")}/responses'
+            else:
+                api_version = api_config.get("api_version", "2023-03-15-preview")
+                headers["api-version"] = api_version
+                model = _sanitize_model_for_url(payload.get("model", ""))
+                request_url = f"{url}/openai/deployments/{model}/responses?api-version={api_version}"
+        else:
+            request_url = f"{url}/responses"
+
+        session = await get_session()
+        r = await session.request(
+            method="POST",
+            url=request_url,
+            data=body,
+            headers=headers,
+            cookies=cookies,
+            ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
+        )
+
+        # Check if response is SSE
+        if "text/event-stream" in r.headers.get("Content-Type", ""):
+            streaming = True
+            return StreamingResponse(
+                stream_wrapper(r),
+                status_code=r.status,
+                headers=_clean_proxy_headers(r.headers),
+            )
+        else:
+            try:
+                response_data = await r.json()
+            except Exception:
+                response_data = await r.text()
+
+            if r.status >= 400:
+                if isinstance(response_data, (dict, list)):
+                    return JSONResponse(status_code=r.status, content=response_data)
+                else:
+                    return PlainTextResponse(
+                        status_code=r.status, content=response_data
+                    )
+
+            return response_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=r.status if r else 500,
+            detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR,
+        )
+    finally:
+        if not streaming:
+            await cleanup_response(r)
+
+
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     """
@@ -1076,6 +1330,12 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     body = await request.body()
 
     idx = 0
+    model_id = payload.get("model") if isinstance(payload, dict) else None
+    if model_id:
+        model = await resolve_openai_model(request, model_id, user)
+        if model:
+            idx = model["urlIdx"]
+
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
     api_config = request.app.state.config.OPENAI_API_CONFIGS.get(

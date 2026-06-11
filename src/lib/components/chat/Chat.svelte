@@ -1163,9 +1163,7 @@
 				}
 
 				if (content && typeof content === 'object') {
-					return Object.values(content).some((value) => value && value !== '')
-						? error
-						: null;
+					return Object.values(content).some((value) => value && value !== '') ? error : null;
 				}
 
 				if (content === null || content === undefined || content === false) {
@@ -1651,9 +1649,7 @@
 			// Emit chat event for TTS
 			let lastMessageContentPart =
 				getMessageContentParts(
-					removeAllDetails(
-						responseChannelPlan.voiceText ?? responseChannelPlan.displayText ?? ''
-					),
+					removeAllDetails(responseChannelPlan.voiceText ?? responseChannelPlan.displayText ?? ''),
 					$config?.audio?.tts?.split_on ?? 'punctuation'
 				)?.at(-1) ?? '';
 			if (lastMessageContentPart) {
@@ -1829,9 +1825,7 @@
 
 		let _chatId = JSON.parse(JSON.stringify($chatId));
 		const shouldInitNewChat =
-			newChat &&
-			parentId !== null &&
-			(_history.messages[parentId]?.parentId ?? null) === null;
+			newChat && parentId !== null && (_history.messages[parentId]?.parentId ?? null) === null;
 
 		const responseMessageIds: Record<PropertyKey, string> = {};
 		// If modelId is provided, use it, else use selected model

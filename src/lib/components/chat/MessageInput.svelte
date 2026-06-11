@@ -133,6 +133,9 @@
 	let selectedValvesItemId = null;
 	let integrationsMenuCloseOnOutsideClick = true;
 
+	let hasActiveResponse = false;
+	$: hasActiveResponse = generating || (taskIds?.length ?? 0) > 0;
+
 	$: if (!showValvesModal) {
 		integrationsMenuCloseOnOutsideClick = true;
 	}
@@ -1686,7 +1689,7 @@
 								</div>
 
 								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.5px]">
-									{#if (taskIds && taskIds.length > 0) || (history.currentId && history.messages[history.currentId]?.done != true) || generating}
+									{#if hasActiveResponse}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>
 												<button

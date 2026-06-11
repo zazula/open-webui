@@ -803,7 +803,18 @@ async def get_tool_server_data(url: str, headers: Optional[dict]) -> Dict[str, A
             error = str(err)
         raise Exception(error)
 
-    log.debug(f"Fetched data: {res}")
+    if isinstance(res, dict):
+        path_count = len(res.get("paths", {}) or {})
+        schema_count = len((res.get("components", {}) or {}).get("schemas", {}) or {})
+        log.debug(
+            "Fetched tool server spec summary: title=%s version=%s paths=%s schemas=%s",
+            ((res.get("info") or {}).get("title")),
+            ((res.get("info") or {}).get("version")),
+            path_count,
+            schema_count,
+        )
+    else:
+        log.debug("Fetched tool server spec of type %s", type(res).__name__)
     return res
 
 

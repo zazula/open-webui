@@ -149,7 +149,15 @@ window.Chart = parent.Chart; // Chart previously assigned on parent
 
 		const data = e.data || {};
 		if (data?.type === 'iframe:height' && typeof data.height === 'number') {
-			iframe.style.height = Math.max(0, data.height) + 'px';
+			// claude-fix:iframe-height-hysteresis — hysteresis breaks the viz-embed resize feedback loop
+			// (viz HTML posts height every 400ms + on every parent-DOM mutation;
+			// scrolling triggers mutations → recompute → grow → mutation → ...).
+			// Ignore deltas within ±10px of the current height.
+			const nextH = Math.max(0, data.height);
+			const currentH = iframe.offsetHeight || 0;
+			if (Math.abs(nextH - currentH) > 10) {
+				iframe.style.height = nextH + 'px';
+			}
 		}
 
 		// Pong message for testing connectivity
