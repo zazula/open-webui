@@ -4,10 +4,7 @@
 
 	import { user, settings, config } from '$lib/stores';
 	import { getVoices as _getVoices } from '$lib/apis/audio';
-	import {
-		VOICE_RESPONSE_CHANNELS,
-		type VoiceResponseChannel
-	} from '$lib/utils/voiceProtocol';
+	import { VOICE_RESPONSE_CHANNELS, type VoiceResponseChannel } from '$lib/utils/voiceProtocol';
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';

@@ -541,7 +541,6 @@ from open_webui.utils.redis import get_sentinels_from_env
 
 from open_webui.constants import ERROR_MESSAGES
 
-
 if SAFE_MODE:
     print("SAFE MODE ENABLED")
     Functions.deactivate_all_functions()
@@ -573,8 +572,7 @@ class SPAStaticFiles(StaticFiles):
                 raise ex
 
 
-print(
-    rf"""
+print(rf"""
  ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
 ██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
 ██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
@@ -586,8 +584,7 @@ print(
 v{VERSION} - building the best AI user interface.
 {f"Commit: {WEBUI_BUILD_HASH}" if WEBUI_BUILD_HASH != "dev-build" else ""}
 https://github.com/open-webui/open-webui
-"""
-)
+""")
 
 
 @asynccontextmanager
@@ -1494,12 +1491,12 @@ async def get_models(
         try:
             model_tags = [
                 tag_name
-                for tag in model.get('info', {}).get('meta', {}).get('tags', [])
+                for tag in model.get("info", {}).get("meta", {}).get("tags", [])
                 if (tag_name := normalize_tag_name(tag))
             ]
             tags = [
                 tag_name
-                for tag in model.get('tags', [])
+                for tag in model.get("tags", [])
                 if (tag_name := normalize_tag_name(tag))
             ]
 
@@ -1525,8 +1522,8 @@ async def get_models(
 
     models = get_filtered_models(models, user)
 
-    log.debug('/api/models returned %s accessible model(s)', len(models))
-    return {'data': models}
+    log.debug("/api/models returned %s accessible model(s)", len(models))
+    return {"data": models}
 
 
 @app.get("/api/models/base")

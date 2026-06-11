@@ -157,7 +157,9 @@ def _get_cached_openai_model_from_unified_state(request: Request, model_id: str)
     return None
 
 
-async def resolve_openai_model(request: Request, model_id: Optional[str], user: UserModel):
+async def resolve_openai_model(
+    request: Request, model_id: Optional[str], user: UserModel
+):
     if not model_id:
         return None
 
@@ -176,9 +178,9 @@ async def resolve_openai_model(request: Request, model_id: Optional[str], user: 
     }
     _set_openai_models_cache(request, refreshed_models)
 
-    return refreshed_models.get(model_id) or _get_cached_openai_model_from_unified_state(
-        request, model_id
-    )
+    return refreshed_models.get(
+        model_id
+    ) or _get_cached_openai_model_from_unified_state(request, model_id)
 
 
 async def get_headers_and_cookies(
@@ -516,12 +518,12 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
                     model["connection_type"] = connection_type
 
     response_counts = [
-        len(response.get('data', []))
+        len(response.get("data", []))
         for response in responses
         if isinstance(response, dict)
     ]
     log.debug(
-        'get_all_models:responses() fetched %s response payload(s) with model counts=%s',
+        "get_all_models:responses() fetched %s response payload(s) with model counts=%s",
         len(responses),
         response_counts,
     )
@@ -838,24 +840,24 @@ def get_azure_allowed_params(api_version: str) -> set[str]:
 def is_openai_new_model(model: str) -> bool:
     model_lower = model.lower()
     # o-series models (o1, o3, o4, o5, ...)
-    if re.match(r'^o\d+', model_lower):
+    if re.match(r"^o\d+", model_lower):
         return True
     # gpt-N where N >= 5 (gpt-5, gpt-5.2, gpt-6, ...)
-    m = re.match(r'^gpt-(\d+)', model_lower)
+    m = re.match(r"^gpt-(\d+)", model_lower)
     if m and int(m.group(1)) >= 5:
         return True
     return False
 
 
 def is_zai_glm_chat_completion(url: str, model: str) -> bool:
-    model_lower = (model or '').lower()
-    url_lower = (url or '').lower()
-    return 'api.z.ai' in url_lower and model_lower.startswith('glm-')
+    model_lower = (model or "").lower()
+    url_lower = (url or "").lower()
+    return "api.z.ai" in url_lower and model_lower.startswith("glm-")
 
 
 def payload_has_reasoning_content(messages: list[dict]) -> bool:
     return any(
-        isinstance(message, dict) and bool(message.get('reasoning_content'))
+        isinstance(message, dict) and bool(message.get("reasoning_content"))
         for message in messages or []
     )
 
@@ -868,19 +870,23 @@ def apply_zai_glm_reasoning_and_tool_params(payload: dict) -> dict:
     thinking.clear_thinking=false so GLM preserves the reasoning chain in the
     required top-level field instead of treating <think> tags as visible text.
     """
-    messages = payload.get('messages') or []
+    messages = payload.get("messages") or []
 
     if payload_has_reasoning_content(messages):
-        thinking = payload.get('thinking')
+        thinking = payload.get("thinking")
         if not isinstance(thinking, dict):
             thinking = {}
 
-        thinking.setdefault('type', 'enabled')
-        thinking['clear_thinking'] = False
-        payload['thinking'] = thinking
+        thinking.setdefault("type", "enabled")
+        thinking["clear_thinking"] = False
+        payload["thinking"] = thinking
 
-    if payload.get('stream') and payload.get('tools') and payload.get('tool_stream') is None:
-        payload['tool_stream'] = True
+    if (
+        payload.get("stream")
+        and payload.get("tools")
+        and payload.get("tool_stream") is None
+    ):
+        payload["tool_stream"] = True
 
     return payload
 
@@ -892,12 +898,12 @@ def _sanitize_model_for_url(model: str) -> str:
     the name so it is safe to use as a single URL path segment
     (e.g. Azure deployment name).
     """
-    if not model or '..' in model or '/' in model or '\\' in model:
+    if not model or ".." in model or "/" in model or "\\" in model:
         raise HTTPException(
             status_code=400,
-            detail='Invalid model name: must not be empty or contain path separators or traversal sequences',
+            detail="Invalid model name: must not be empty or contain path separators or traversal sequences",
         )
-    return quote(model, safe='')
+    return quote(model, safe="")
 
 
 def convert_to_azure_payload(url, payload: dict, api_version: str):
@@ -1045,7 +1051,7 @@ async def generate_chat_completion(
     else:
         request_url = f"{url}/chat/completions"
 
-    if not is_responses and is_zai_glm_chat_completion(url, payload.get('model', '')):
+    if not is_responses and is_zai_glm_chat_completion(url, payload.get("model", "")):
         payload = apply_zai_glm_reasoning_and_tool_params(payload)
 
     payload = json.dumps(payload)
@@ -1122,11 +1128,11 @@ async def embeddings(request: Request, form_data: dict, user):
     # Prepare payload/body
     body = json.dumps(form_data)
     # Find correct backend url/key based on model
-    model_id = form_data.get('model')
+    model_id = form_data.get("model")
     # Check if model is already in app state cache to avoid expensive get_all_models() call
     model = await resolve_openai_model(request, model_id, user)
     if model:
-        idx = model['urlIdx']
+        idx = model["urlIdx"]
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
@@ -1189,7 +1195,7 @@ async def embeddings(request: Request, form_data: dict, user):
 
 
 class ResponsesForm(BaseModel):
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra="allow")
 
     model: str
     input: Optional[list | str] = None
@@ -1208,7 +1214,7 @@ class ResponsesForm(BaseModel):
     previous_response_id: Optional[str] = None
 
 
-@router.post('/responses')
+@router.post("/responses")
 async def responses(
     request: Request,
     form_data: ResponsesForm,
@@ -1224,14 +1230,16 @@ async def responses(
     model_id = form_data.model
 
     # Enforce per-model access control
-    await check_model_access(user, await Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL)
+    await check_model_access(
+        user, await Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL
+    )
 
     body = json.dumps(payload)
 
     if model_id:
         model = await resolve_openai_model(request, model_id, user)
         if model:
-            idx = model['urlIdx']
+            idx = model["urlIdx"]
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]
@@ -1244,28 +1252,30 @@ async def responses(
     streaming = False
 
     try:
-        headers, cookies = await get_headers_and_cookies(request, url, key, api_config, user=user)
+        headers, cookies = await get_headers_and_cookies(
+            request, url, key, api_config, user=user
+        )
 
-        if api_config.get('azure', False):
-            auth_type = api_config.get('auth_type', 'bearer')
-            if auth_type not in ('azure_ad', 'microsoft_entra_id'):
-                headers['api-key'] = key
+        if api_config.get("azure", False):
+            auth_type = api_config.get("auth_type", "bearer")
+            if auth_type not in ("azure_ad", "microsoft_entra_id"):
+                headers["api-key"] = key
 
-            is_azure_v1 = bool(re.search(r'/openai/v1(?:/|$)', url))
+            is_azure_v1 = bool(re.search(r"/openai/v1(?:/|$)", url))
 
             if is_azure_v1:
                 request_url = f'{url.rstrip("/")}/responses'
             else:
-                api_version = api_config.get('api_version', '2023-03-15-preview')
-                headers['api-version'] = api_version
-                model = _sanitize_model_for_url(payload.get('model', ''))
-                request_url = f'{url}/openai/deployments/{model}/responses?api-version={api_version}'
+                api_version = api_config.get("api_version", "2023-03-15-preview")
+                headers["api-version"] = api_version
+                model = _sanitize_model_for_url(payload.get("model", ""))
+                request_url = f"{url}/openai/deployments/{model}/responses?api-version={api_version}"
         else:
-            request_url = f'{url}/responses'
+            request_url = f"{url}/responses"
 
         session = await get_session()
         r = await session.request(
-            method='POST',
+            method="POST",
             url=request_url,
             data=body,
             headers=headers,
@@ -1275,7 +1285,7 @@ async def responses(
         )
 
         # Check if response is SSE
-        if 'text/event-stream' in r.headers.get('Content-Type', ''):
+        if "text/event-stream" in r.headers.get("Content-Type", ""):
             streaming = True
             return StreamingResponse(
                 stream_wrapper(r),
@@ -1292,7 +1302,9 @@ async def responses(
                 if isinstance(response_data, (dict, list)):
                     return JSONResponse(status_code=r.status, content=response_data)
                 else:
-                    return PlainTextResponse(status_code=r.status, content=response_data)
+                    return PlainTextResponse(
+                        status_code=r.status, content=response_data
+                    )
 
             return response_data
 
@@ -1309,7 +1321,7 @@ async def responses(
             await cleanup_response(r)
 
 
-@router.api_route('/{path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     """
     Deprecated: proxy all requests to OpenAI API
@@ -1318,11 +1330,11 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     body = await request.body()
 
     idx = 0
-    model_id = payload.get('model') if isinstance(payload, dict) else None
+    model_id = payload.get("model") if isinstance(payload, dict) else None
     if model_id:
         model = await resolve_openai_model(request, model_id, user)
         if model:
-            idx = model['urlIdx']
+            idx = model["urlIdx"]
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
     key = request.app.state.config.OPENAI_API_KEYS[idx]

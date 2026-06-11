@@ -207,7 +207,10 @@
 		return content.trim();
 	};
 
-	$: channelPlan = planVoiceProtocolContent(message?.content, $settings?.responseOutputChannel ?? 'both');
+	$: channelPlan = planVoiceProtocolContent(
+		message?.content,
+		$settings?.responseOutputChannel ?? 'both'
+	);
 	$: displayContent = serializeOutputForDisplay(message?.output) || channelPlan.displayText || '';
 	$: copyableContent = getCopyableVoiceProtocolText(
 		message?.content,
@@ -230,9 +233,7 @@
 		(displayContent?.length ?? 0) > LARGE_MESSAGE_RENDER_THRESHOLD;
 	$: {
 		const previewSource = (copyableContent || removeAllDetails(displayContent || '') || '').trim();
-		largeMessagePreview = previewSource
-			.slice(0, LARGE_MESSAGE_PREVIEW_LENGTH)
-			.trimEnd();
+		largeMessagePreview = previewSource.slice(0, LARGE_MESSAGE_PREVIEW_LENGTH).trimEnd();
 	}
 
 	export let siblings;
@@ -875,13 +876,16 @@
 							{#if displayContent === '' && !message.error && !isVoiceOnlyMessage && ((model?.info?.meta?.capabilities?.status_updates ?? true) ? (message?.statusHistory ?? [...(message?.status ? [message?.status] : [])]).length === 0 || (message?.statusHistory?.at(-1)?.hidden ?? false) : true)}
 								<Skeleton />
 							{:else if deferLargeMessageRender}
-								<div class="w-full rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+								<div
+									class="w-full rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300"
+								>
 									<div class="flex flex-wrap items-center justify-between gap-3">
 										<div class="font-medium text-gray-900 dark:text-gray-100">
 											{$i18n.t('Large response collapsed for performance')}
 										</div>
 										<div class="text-xs text-gray-500 dark:text-gray-400">
-											{new Intl.NumberFormat().format(displayContent.length)} {$i18n.t('characters')}
+											{new Intl.NumberFormat().format(displayContent.length)}
+											{$i18n.t('characters')}
 										</div>
 									</div>
 
@@ -892,7 +896,11 @@
 									</p>
 
 									{#if largeMessagePreview}
-										<pre class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-5 text-gray-600 dark:bg-gray-950 dark:text-gray-300">{largeMessagePreview}{displayContent.length > LARGE_MESSAGE_PREVIEW_LENGTH ? '\n…' : ''}</pre>
+										<pre
+											class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-5 text-gray-600 dark:bg-gray-950 dark:text-gray-300">{largeMessagePreview}{displayContent.length >
+											LARGE_MESSAGE_PREVIEW_LENGTH
+												? '\n…'
+												: ''}</pre>
 									{/if}
 
 									<div class="mt-3 flex items-center gap-2">
@@ -908,7 +916,9 @@
 									</div>
 								</div>
 							{:else if isVoiceOnlyMessage}
-								<div class="rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+								<div
+									class="rounded-2xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300"
+								>
 									{$i18n.t('Voice-only response ready. Use Read Aloud to play it.')}
 								</div>
 							{:else if displayContent && message.error !== true}

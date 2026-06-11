@@ -42,9 +42,7 @@
 			? token.text.match(/<audio[^>]*>([\s\S]*?)<\/audio>/)
 			: null}
 		{@const rawAudioSrc =
-			(audioAttrMatch && audioAttrMatch[1]) ||
-			(audioInnerMatch && audioInnerMatch[1]) ||
-			''}
+			(audioAttrMatch && audioAttrMatch[1]) || (audioInnerMatch && audioInnerMatch[1]) || ''}
 		{@const audioSrc = /^(https?:\/\/|data:audio\/)/i.test(rawAudioSrc)
 			? rawAudioSrc.replaceAll('&amp;', '&')
 			: ''}

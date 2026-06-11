@@ -112,8 +112,7 @@
 		('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
 	$: settingsSttEngine = $settings?.audio?.stt?.engine ?? '';
 	$: configSttEngine = $config?.audio?.stt?.engine ?? '';
-	$: effectiveSttEngine =
-		configSttEngine === 'web' ? 'web' : settingsSttEngine || configSttEngine;
+	$: effectiveSttEngine = configSttEngine === 'web' ? 'web' : settingsSttEngine || configSttEngine;
 	$: useWebStt =
 		supportsBrowserStt && !$isApp && (effectiveSttEngine === 'web' || effectiveSttEngine === '');
 
@@ -365,9 +364,7 @@
 				speechRecognition.onerror = (event) => {
 					console.log(event);
 					if (event?.error !== 'aborted') {
-						toast.error(
-							$i18n.t(`Speech recognition error: {{error}}`, { error: event.error })
-						);
+						toast.error($i18n.t(`Speech recognition error: {{error}}`, { error: event.error }));
 					}
 					stopAudioStream();
 				};
@@ -580,8 +577,8 @@
 	};
 
 	const stopAllAudio = async () => {
-  assistantSpeaking = false;
-  interrupted = true;
+		assistantSpeaking = false;
+		interrupted = true;
 
 		if (chatStreaming) {
 			stopResponse();
@@ -1123,27 +1120,27 @@
 						}
 					}}
 				>
-	<div class="line-clamp-1 text-sm font-medium">
-		{statusText}
-	</div>
-		</button>
-	</div>
-	<div>
-		<button
-			type="button"
-			class={`px-3 py-2 rounded-full border transition flex items-center gap-2 ${muteButtonClasses}`}
-			on:click={handleMicToggle}
-			aria-label={muteButtonLabel}
-		>
-				<MicSolid class="size-4" />
-				<div class="text-left leading-tight">
-					<div class="text-xs font-semibold">{muteButtonLabel}</div>
-					{#if isMuted}
-						<div class={`text-[11px] ${muteIndicatorClasses}`}>{muteIndicatorText}</div>
-					{/if}
-				</div>
-			</button>
-	</div>
+					<div class="line-clamp-1 text-sm font-medium">
+						{statusText}
+					</div>
+				</button>
+			</div>
+			<div>
+				<button
+					type="button"
+					class={`px-3 py-2 rounded-full border transition flex items-center gap-2 ${muteButtonClasses}`}
+					on:click={handleMicToggle}
+					aria-label={muteButtonLabel}
+				>
+					<MicSolid class="size-4" />
+					<div class="text-left leading-tight">
+						<div class="text-xs font-semibold">{muteButtonLabel}</div>
+						{#if isMuted}
+							<div class={`text-[11px] ${muteIndicatorClasses}`}>{muteIndicatorText}</div>
+						{/if}
+					</div>
+				</button>
+			</div>
 
 			<div>
 				<button

@@ -83,7 +83,9 @@
 		typeof window !== 'undefined' &&
 		('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
 	$: useWebStt =
-		supportsBrowserStt && !$isApp && (($settings?.audio?.stt?.engine ?? '') === 'web' ||
+		supportsBrowserStt &&
+		!$isApp &&
+		(($settings?.audio?.stt?.engine ?? '') === 'web' ||
 			($settings?.audio?.stt?.engine ?? '') === '');
 	$: autoMuteOnSilence = $settings?.speechAutoMute ?? true;
 

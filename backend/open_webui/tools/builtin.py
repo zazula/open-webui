@@ -1437,7 +1437,7 @@ async def query_knowledge_files(
         return json.dumps({"error": "Request context not available"})
 
     if not __user__:
-        return json.dumps({'error': 'User context not available'})
+        return json.dumps({"error": "User context not available"})
 
     # Coerce parameters from LLM tool calls (may come as strings)
     if isinstance(count, str):
@@ -1452,10 +1452,10 @@ async def query_knowledge_files(
 
         if isinstance(value, str):
             stripped = value.strip()
-            if stripped.lower() in ('none', 'null', ''):
+            if stripped.lower() in ("none", "null", ""):
                 return []
 
-            if stripped.startswith('[') or stripped.startswith('{'):
+            if stripped.startswith("[") or stripped.startswith("{"):
                 try:
                     return _flatten_knowledge_ids(json.loads(stripped))
                 except json.JSONDecodeError:

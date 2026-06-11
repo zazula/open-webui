@@ -132,11 +132,13 @@ async def get_base_models(
 ###########################
 
 
-@router.get('/tags', response_model=list[str])
-async def get_model_tags(user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+@router.get("/tags", response_model=list[str])
+async def get_model_tags(
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
     tags = await Models.get_all_tags(
         user_id=user.id,
-        is_admin=(user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL),
+        is_admin=(user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL),
         db=db,
     )
     normalized_tags = {

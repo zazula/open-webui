@@ -317,11 +317,7 @@ class ChatTable:
             else content not in (None, "", [], {})
         )
 
-        return bool(
-            message.get("error")
-            or message.get("output")
-            or has_content
-        )
+        return bool(message.get("error") or message.get("output") or has_content)
 
     def _is_assistant_like_message(self, message: dict) -> bool:
         if not isinstance(message, dict):
@@ -339,9 +335,10 @@ class ChatTable:
             "annotation",
             "arena",
         }
-        return any(key in message for key in assistant_keys) or message.get(
-            "parentId"
-        ) is not None
+        return (
+            any(key in message for key in assistant_keys)
+            or message.get("parentId") is not None
+        )
 
     def _normalize_message_payload(
         self, message_id: str, message: dict, existing: Optional[dict] = None
@@ -529,9 +526,9 @@ class ChatTable:
                     return None
                 chat_item.chat = self._normalize_chat_payload(chat, force_current=True)
                 chat_item.title = (
-                    self._clean_null_bytes(chat['title'])
-                    if 'title' in chat
-                    else 'New Chat'
+                    self._clean_null_bytes(chat["title"])
+                    if "title" in chat
+                    else "New Chat"
                 )
 
                 chat_item.updated_at = int(time.time())
@@ -605,11 +602,11 @@ class ChatTable:
 
         user_id = chat.user_id
         chat = chat.chat
-        history = chat.get('history', {})
-        messages = history.setdefault('messages', {})
+        history = chat.get("history", {})
+        messages = history.setdefault("messages", {})
         existing_message = messages.get(message_id, {})
 
-        history['messages'][message_id] = self._normalize_message_payload(
+        history["messages"][message_id] = self._normalize_message_payload(
             message_id, message, existing=existing_message
         )
 
@@ -1179,29 +1176,23 @@ class ChatTable:
 
                 # Check if there are any tags to filter, it should have all the tags
                 if "none" in tag_ids:
-                    query = query.filter(
-                        text(
-                            """
+                    query = query.filter(text("""
                             NOT EXISTS (
                                 SELECT 1
                                 FROM json_each(Chat.meta, '$.tags') AS tag
                             )
-                            """
-                        )
-                    )
+                            """))
                 elif tag_ids:
                     query = query.filter(
                         and_(
                             *[
-                                text(
-                                    f"""
+                                text(f"""
                                     EXISTS (
                                         SELECT 1
                                         FROM json_each(Chat.meta, '$.tags') AS tag
                                         WHERE tag.value = :tag_id_{tag_idx}
                                     )
-                                    """
-                                ).params(**{f"tag_id_{tag_idx}": tag_id})
+                                    """).params(**{f"tag_id_{tag_idx}": tag_id})
                                 for tag_idx, tag_id in enumerate(tag_ids)
                             ]
                         )
@@ -1237,29 +1228,23 @@ class ChatTable:
 
                 # Check if there are any tags to filter, it should have all the tags
                 if "none" in tag_ids:
-                    query = query.filter(
-                        text(
-                            """
+                    query = query.filter(text("""
                             NOT EXISTS (
                                 SELECT 1
                                 FROM json_array_elements_text(Chat.meta->'tags') AS tag
                             )
-                            """
-                        )
-                    )
+                            """))
                 elif tag_ids:
                     query = query.filter(
                         and_(
                             *[
-                                text(
-                                    f"""
+                                text(f"""
                                     EXISTS (
                                         SELECT 1
                                         FROM json_array_elements_text(Chat.meta->'tags') AS tag
                                         WHERE tag = :tag_id_{tag_idx}
                                     )
-                                    """
-                                ).params(**{f"tag_id_{tag_idx}": tag_id})
+                                    """).params(**{f"tag_id_{tag_idx}": tag_id})
                                 for tag_idx, tag_id in enumerate(tag_ids)
                             ]
                         )

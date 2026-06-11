@@ -95,7 +95,9 @@ def _normalize_output_items(output: list | None, *, mark_completed: bool = False
     return normalized_output
 
 
-def _should_finalize_stale_assistant_message(message: dict, force: bool = False) -> bool:
+def _should_finalize_stale_assistant_message(
+    message: dict, force: bool = False
+) -> bool:
     if not isinstance(message, dict):
         return False
 
@@ -110,9 +112,7 @@ def _should_finalize_stale_assistant_message(message: dict, force: bool = False)
     )
 
     has_terminal_payload = bool(
-        message.get("error")
-        or message.get("output")
-        or has_content
+        message.get("error") or message.get("output") or has_content
     )
     if not has_terminal_payload:
         return False
@@ -143,12 +143,15 @@ def _is_assistant_like_message(message: dict) -> bool:
         "annotation",
         "arena",
     }
-    return any(key in message for key in assistant_keys) or message.get(
-        "parentId"
-    ) is not None
+    return (
+        any(key in message for key in assistant_keys)
+        or message.get("parentId") is not None
+    )
 
 
-def _normalize_message_shape(message_id: str, message: dict, force: bool = False) -> dict:
+def _normalize_message_shape(
+    message_id: str, message: dict, force: bool = False
+) -> dict:
     normalized = copy.deepcopy(message) if isinstance(message, dict) else {}
     normalized["id"] = message_id
 
@@ -169,7 +172,9 @@ def _normalize_message_shape(message_id: str, message: dict, force: bool = False
     role = normalized.get("role")
     if role is None and _is_assistant_like_message(normalized):
         normalized["role"] = "assistant"
-    elif role is None and "content" in normalized and normalized.get("parentId") is None:
+    elif (
+        role is None and "content" in normalized and normalized.get("parentId") is None
+    ):
         normalized["role"] = "user"
 
     if normalized.get("role") == "assistant":
@@ -181,11 +186,12 @@ def _normalize_message_shape(message_id: str, message: dict, force: bool = False
                 else content not in (None, "", [], {})
             )
             has_terminal_payload = bool(
-                normalized.get("error")
-                or normalized.get("output")
-                or has_content
+                normalized.get("error") or normalized.get("output") or has_content
             )
-            if force or (has_terminal_payload and _should_finalize_stale_assistant_message(normalized, force=force)):
+            if force or (
+                has_terminal_payload
+                and _should_finalize_stale_assistant_message(normalized, force=force)
+            ):
                 normalized["done"] = True
             else:
                 normalized["done"] = False
@@ -211,16 +217,16 @@ def _normalize_chat_incomplete_state(chat_payload: dict, force: bool = False) ->
         return payload
 
     for message_id, message in list(messages.items()):
-        normalized_message = _normalize_message_shape(
-            message_id, message, force=force
-        )
+        normalized_message = _normalize_message_shape(message_id, message, force=force)
         if normalized_message != message:
             messages[message_id] = normalized_message
 
     return payload
 
 
-async def _prepare_chat_response(chat: ChatModel, db: Optional[AsyncSession] = None) -> dict:
+async def _prepare_chat_response(
+    chat: ChatModel, db: Optional[AsyncSession] = None
+) -> dict:
     chat_data = chat.model_dump()
     normalized_chat = _normalize_chat_incomplete_state(chat_data["chat"])
 
@@ -232,6 +238,7 @@ async def _prepare_chat_response(chat: ChatModel, db: Optional[AsyncSession] = N
         chat_data["chat"] = normalized_chat
 
     return chat_data
+
 
 ############################
 # GetChatList
@@ -1065,28 +1072,32 @@ async def unarchive_all_chats(
 async def get_shared_chat_by_id(
     share_id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
 ):
-    if user.role == 'pending':
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+    if user.role == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND
+        )
 
     chat = await Chats.get_chat_by_share_id(share_id, db=db)
 
     # Admin chat access historically allowed looking up a chat by id through
     # this route. Keep that fallback, but prefer share_id lookup so admins can
     # open normal /s/<share_id> links too.
-    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    if not chat and user.role == "admin" and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(share_id, db=db)
 
     if not chat:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND
+        )
 
     # Look up the original chat_id to check access grants
     shared = await SharedChats.get_by_id(share_id, db=db)
     if shared:
         has_grant = await AccessGrants.has_access(
             user_id=user.id,
-            resource_type='shared_chat',
+            resource_type="shared_chat",
             resource_id=shared.chat_id,
-            permission='read',
+            permission="read",
             db=db,
         )
 
@@ -1157,7 +1168,9 @@ async def update_chat_by_id(
 ):
     chat = Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
-        updated_chat = _normalize_chat_incomplete_state({**chat.chat, **form_data.chat}, force=True)
+        updated_chat = _normalize_chat_incomplete_state(
+            {**chat.chat, **form_data.chat}, force=True
+        )
         chat = await Chats.update_chat_by_id(id, updated_chat, db=db)
         return ChatResponse(**chat.model_dump())
     else:
@@ -1384,9 +1397,11 @@ async def clone_chat_by_id(
         updated_chat = _normalize_chat_incomplete_state(
             {
                 **chat.chat,
-                'originalChatId': chat.id,
-                'branchPointMessageId': chat.chat['history']['currentId'],
-                'title': form_data.title if form_data.title else f'Clone of {chat.title}',
+                "originalChatId": chat.id,
+                "branchPointMessageId": chat.chat["history"]["currentId"],
+                "title": (
+                    form_data.title if form_data.title else f"Clone of {chat.title}"
+                ),
             },
             force=True,
         )
@@ -1470,9 +1485,9 @@ async def clone_shared_chat_by_id(
     updated_chat = _normalize_chat_incomplete_state(
         {
             **chat.chat,
-            'originalChatId': chat.id,
-            'branchPointMessageId': chat.chat['history']['currentId'],
-            'title': f'Clone of {chat.title}',
+            "originalChatId": chat.id,
+            "branchPointMessageId": chat.chat["history"]["currentId"],
+            "title": f"Clone of {chat.title}",
         },
         force=True,
     )
@@ -1482,10 +1497,10 @@ async def clone_shared_chat_by_id(
         [
             ChatImportForm(
                 **{
-                    'chat': updated_chat,
-                    'meta': chat.meta,
-                    'pinned': chat.pinned,
-                    'folder_id': chat.folder_id,
+                    "chat": updated_chat,
+                    "meta": chat.meta,
+                    "pinned": chat.pinned,
+                    "folder_id": chat.folder_id,
                 }
             )
         ],
