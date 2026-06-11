@@ -520,8 +520,8 @@ class ChatTable:
         self, id: str, chat: dict, db: Optional[Session] = None
     ) -> Optional[ChatModel]:
         try:
-            async with get_async_db_context(db) as db:
-                chat_item = await db.get(Chat, id)
+            with get_db_context(db) as db:
+                chat_item = db.get(Chat, id)
                 if chat_item is None:
                     return None
                 chat_item.chat = self._normalize_chat_payload(chat, force_current=True)

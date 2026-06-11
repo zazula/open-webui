@@ -231,7 +231,7 @@ async def _prepare_chat_response(
     normalized_chat = _normalize_chat_incomplete_state(chat_data["chat"])
 
     if normalized_chat != chat_data["chat"]:
-        updated = await Chats.update_chat_by_id(chat.id, normalized_chat, db=db)
+        updated = Chats.update_chat_by_id(chat.id, normalized_chat, db=db)
         if updated is not None:
             return updated.model_dump()
 
@@ -1171,7 +1171,7 @@ async def update_chat_by_id(
         updated_chat = _normalize_chat_incomplete_state(
             {**chat.chat, **form_data.chat}, force=True
         )
-        chat = await Chats.update_chat_by_id(id, updated_chat, db=db)
+        chat = Chats.update_chat_by_id(id, updated_chat, db=db)
         return ChatResponse(**chat.model_dump())
     else:
         raise HTTPException(
