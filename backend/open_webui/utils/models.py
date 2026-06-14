@@ -146,6 +146,11 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
         for function in Functions.get_functions_by_type("filter", active_only=True)
     ]
 
+    base_model_lookup = {model["id"]: model for model in models if "id" in model}
+    for model in models:
+        if model.get("owned_by") == "ollama" and isinstance(model.get("id"), str):
+            base_model_lookup.setdefault(model["id"].split(":")[0], model)
+
     custom_models = Models.get_all_models()
     for custom_model in custom_models:
         if custom_model.base_model_id is None:
@@ -296,7 +301,12 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
     all_function_ids.update(global_filter_ids)
 
     functions_by_id = {
-        f.id: f for f in await Functions.get_functions_by_ids(list(all_function_ids))
+        function.id: function
+        for function in (
+            Functions.get_function_by_id(function_id)
+            for function_id in all_function_ids
+        )
+        if function is not None
     }
     active_functions_by_id = {
         function_id: function
@@ -342,11 +352,10 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
                 elif meta.get(key) is None:
                     meta[key] = copy.deepcopy(value)
 
-    # Batch-fetch all function valves in one query to avoid N+1 DB hits
-    # inside get_action_priority (previously called per action × per model).
-    all_function_valves = await Functions.get_function_valves_by_ids(
-        list(all_function_ids)
-    )
+    all_function_valves = {
+        function_id: Functions.get_function_valves_by_id(function_id) or {}
+        for function_id in functions_by_id
+    }
 
     def get_action_priority(action_id):
         try:
@@ -373,22 +382,37 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
 
         model["actions"] = []
         for action_id in action_ids:
-            action_function = Functions.get_function_by_id(action_id)
+            action_function = functions_by_id.get(action_id)
             if action_function is None:
-                raise Exception(f"Action not found: {action_id}")
+                log.debug(f"Skipping missing action function referenced by model metadata: {action_id}")
+                continue
 
-            function_module = get_function_module_by_id(action_id)
+            try:
+                function_module, _, _ = get_function_module_from_cache(
+                    request, action_id, function=action_function
+                )
+            except Exception as e:
+                log.debug(f"Skipping unloadable action function {action_id}: {e}")
+                continue
+
             model["actions"].extend(
                 get_action_items_from_module(action_function, function_module)
             )
 
         model["filters"] = []
         for filter_id in filter_ids:
-            filter_function = Functions.get_function_by_id(filter_id)
+            filter_function = functions_by_id.get(filter_id)
             if filter_function is None:
-                raise Exception(f"Filter not found: {filter_id}")
+                log.debug(f"Skipping missing filter function referenced by model metadata: {filter_id}")
+                continue
 
-            function_module = get_function_module_by_id(filter_id)
+            try:
+                function_module, _, _ = get_function_module_from_cache(
+                    request, filter_id, function=filter_function
+                )
+            except Exception as e:
+                log.debug(f"Skipping unloadable filter function {filter_id}: {e}")
+                continue
 
             if getattr(function_module, "toggle", None):
                 model["filters"].extend(
@@ -406,28 +430,67 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
     return models
 
 
+def _model_value(model, key, default=None):
+    if isinstance(model, dict):
+        return model.get(key, default)
+
+    return getattr(model, key, default)
+
+
+def _normalize_model(model):
+    if isinstance(model, dict) or model is None:
+        return model
+
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+
+    if hasattr(model, "__dict__"):
+        return dict(model.__dict__)
+
+    return None
+
+
 def check_model_access(user, model, db=None):
+    model = _normalize_model(model)
+
+    if not model:
+        raise Exception("Model not found")
+
     if model.get("arena"):
         if not has_access(
             user.id,
             type="read",
-            access_control=model.get("info", {})
-            .get("meta", {})
-            .get("access_control", {}),
+            access_control=(
+                model.get("info", {})
+                .get("meta", {})
+                .get("access_control", {})
+            ),
             db=db,
         ):
             raise Exception("Model not found")
     else:
         model_info = Models.get_model_by_id(model.get("id"), db=db)
-        if not model_info:
-            raise Exception("Model not found")
-        elif not (
-            user.id == model_info.user_id
+        if model_info and not (
+            user.id == _model_value(model_info, "user_id")
             or has_access(
-                user.id, type="read", access_control=model_info.access_control, db=db
+                user.id,
+                type="read",
+                access_control=_model_value(model_info, "access_control"),
+                db=db,
             )
         ):
             raise Exception("Model not found")
+        if not model_info and not has_access(
+            user.id,
+            type="read",
+            access_control=_model_value(model, "access_control"),
+            db=db,
+        ):
+            # Provider-loaded models are not always backed by a DB row. If the
+            # model is present in app state and carries no explicit access
+            # control, treat it as accessible to authenticated users.
+            if _model_value(model, "access_control"):
+                raise Exception("Model not found")
 
 
 def get_filtered_models(models, user, db=None):

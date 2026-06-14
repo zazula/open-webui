@@ -44,6 +44,7 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
 )
+from open_webui.utils.models import check_model_access, get_all_models as get_unified_models
 from open_webui.utils.misc import (
     convert_logit_bias_input_to_json,
     stream_chunks_handler,
@@ -63,6 +64,11 @@ log = logging.getLogger(__name__)
 # Utility functions
 #
 ##########################################
+
+
+def is_openai_reasoning_model(model: str | None) -> bool:
+    normalized_model = (model or "").lower()
+    return normalized_model.startswith(("o1", "o3", "o4", "gpt-5"))
 
 
 async def send_get_request(url, key=None, user: UserModel = None):
@@ -950,8 +956,11 @@ async def generate_chat_completion(
     payload = {**form_data}
     metadata = payload.pop("metadata", None)
 
+    await get_unified_models(request, user=user)
+
     model_id = form_data.get("model")
     model_info = Models.get_model_by_id(model_id, db=db)
+    model = request.app.state.MODELS.get(model_id)
 
     # Check model info and override the payload
     if model_info:
@@ -973,9 +982,9 @@ async def generate_chat_completion(
             if not bypass_system_prompt:
                 payload = apply_system_prompt_to_body(system, payload, metadata, user)
 
-        await check_model_access(user, model_info, bypass_filter)
+        check_model_access(user, model_info, bypass_filter)
     else:
-        await check_model_access(user, None, bypass_filter)
+        check_model_access(user, model, bypass_filter)
 
     # Check if model is already in app state cache to avoid expensive get_all_models() call
     model = await resolve_openai_model(request, model_id, user)
@@ -1051,7 +1060,7 @@ async def generate_chat_completion(
     else:
         request_url = f"{url}/chat/completions"
 
-    if not is_responses and is_zai_glm_chat_completion(url, payload.get("model", "")):
+    if is_zai_glm_chat_completion(url, payload.get("model", "")):
         payload = apply_zai_glm_reasoning_and_tool_params(payload)
 
     payload = json.dumps(payload)
@@ -1230,8 +1239,8 @@ async def responses(
     model_id = form_data.model
 
     # Enforce per-model access control
-    await check_model_access(
-        user, await Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL
+    check_model_access(
+        user, Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL
     )
 
     body = json.dumps(payload)
